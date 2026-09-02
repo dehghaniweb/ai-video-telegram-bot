@@ -1,47 +1,56 @@
 import os
-import re
+import io
 import asyncio
-import tempfile
 import subprocess
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
-import imageio_ffmpeg
-
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
     filters,
 )
 
+from PIL import Image, ImageDraw, ImageFont
+from huggingface_hub import InferenceClient
+
+
 # =========================================================
-# تنظیمات
+# SETTINGS
 # =========================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+HF_TOKEN = os.environ.get("HF_TOKEN")
 
-WIDTH = 720
-HEIGHT = 1280
-FPS = 15
+IMAGE_MODEL = "black-forest-labs/FLUX.1-schnell"
 
+VIDEO_WIDTH = 720
+VIDEO_HEIGHT = 1280
+SCENE_SECONDS = 5
 SCENE_COUNT = 6
-SCENE_DURATION = 5
 
-drafts = {}
+BASE_DIR = Path("video_work")
+BASE_DIR.mkdir(exist_ok=True)
 
 
 # =========================================================
-# فونت
+# USER DATA
 # =========================================================
 
-def get_font(size):
+user_projects = {}
+
+
+# =========================================================
+# FONT
+# =========================================================
+
+def get_font(size=42):
     fonts = [
-        r"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        r"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        r"/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     ]
 
     for font in fonts:
@@ -52,1005 +61,767 @@ def get_font(size):
 
 
 # =========================================================
-# فارسی
+# PROJECT TYPE
 # =========================================================
 
-def rtl(text):
-    try:
-        import arabic_reshaper
-        from bidi.algorithm import get_display
-
-        return get_display(
-            arabic_reshaper.reshape(text)
-        )
-
-    except Exception:
-        return text
-
-
-# =========================================================
-# تشخیص نوع پروژه
-# =========================================================
-
-def detect_type(text):
+def detect_project_type(text):
 
     t = text.lower()
 
     advertising_words = [
         "تبلیغ",
+        "تبلیغات",
         "فروش",
-        "خرید",
-        "محصول",
-        "قیمت",
-        "مشتری",
-        "برند",
-        "تبلیغاتی",
-        "اینستاگرام",
         "فروشگاه",
+        "خرید",
+        "برند",
+        "محصول",
+        "advertising",
+        "advertisement",
+        "sell",
+        "sale",
+        "product",
+        "brand",
     ]
 
     education_words = [
         "آموزش",
-        "آموزشی",
-        "یاد بگیریم",
         "یادگیری",
-        "چگونه",
-        "چطور",
         "درس",
-        "نکته",
-        "آموزش دهید",
+        "آموزشی",
+        "teach",
+        "education",
+        "lesson",
+        "learn",
+        "tutorial",
     ]
 
     product_words = [
         "محصول",
         "کالا",
-        "معرفی",
-        "معرفی محصول",
+        "دستگاه",
+        "اپلیکیشن",
+        "برنامه",
+        "سرویس",
+        "product",
+        "device",
+        "app",
+        "software",
+        "service",
     ]
 
     if any(x in t for x in education_words):
         return "education"
 
-    if any(x in t for x in advertising_words):
-        return "advertising"
-
     if any(x in t for x in product_words):
         return "product"
+
+    if any(x in t for x in advertising_words):
+        return "advertising"
 
     return "general"
 
 
 # =========================================================
-# استخراج موضوع اصلی
+# STORYBOARD
 # =========================================================
 
-def clean_subject(text):
+def create_storyboard(text):
 
-    text = re.sub(
-        r"(یک|یه|برای|بساز|ساخت|ایجاد|کن|مناسب|جذاب|حرفه‌ای|حرفه ای)",
-        " ",
-        text,
-        flags=re.IGNORECASE
-    )
+    project_type = detect_project_type(text)
 
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    ).strip()
-
-    if len(text) > 120:
-        text = text[:120] + "..."
-
-    return text
-
-
-# =========================================================
-# ساخت سناریو
-# =========================================================
-
-def create_story(text):
-
-    project_type = detect_type(text)
-    subject = clean_subject(text)
-
-    if project_type == "education":
+    if project_type == "advertising":
 
         scenes = [
-            (
-                "شروع",
-                "امروز یک نکته مهم را یاد می‌گیریم",
-                subject
-            ),
-            (
-                "مسئله",
-                "چرا این موضوع اهمیت دارد؟",
-                subject
-            ),
-            (
-                "آموزش",
-                "قدم اول را با دقت انجام دهید",
-                subject
-            ),
-            (
-                "نکته مهم",
-                "این نکته می‌تواند نتیجه را بهتر کند",
-                subject
-            ),
-            (
-                "جمع‌بندی",
-                "حالا می‌دانید چگونه بهتر عمل کنید",
-                subject
-            ),
-            (
-                "پایان",
-                "این آموزش را ذخیره و با دیگران به اشتراک بگذارید",
-                subject
-            ),
+            {
+                "title": "شروع",
+                "caption": "یک مشکل واقعی را نشان می‌دهیم",
+                "visual": "cinematic commercial opening, realistic modern environment, a person facing a common problem, natural lighting, professional advertising photography",
+            },
+            {
+                "title": "مشکل",
+                "caption": "مشکل را واضح‌تر می‌کنیم",
+                "visual": "realistic close-up of a person struggling with the problem, emotional but natural facial expression, cinematic commercial photography",
+            },
+            {
+                "title": "راه‌حل",
+                "caption": "راه‌حل وارد داستان می‌شود",
+                "visual": "professional product or service presentation, realistic environment, attractive composition, premium commercial photography",
+            },
+            {
+                "title": "استفاده",
+                "caption": "نحوه استفاده را نشان می‌دهیم",
+                "visual": "real person naturally using the product or service, realistic hands and environment, cinematic advertising scene",
+            },
+            {
+                "title": "نتیجه",
+                "caption": "نتیجه مثبت را نشان می‌دهیم",
+                "visual": "happy satisfied customer after using the solution, natural smile, realistic lifestyle scene, cinematic commercial photography",
+            },
+            {
+                "title": "پایان",
+                "caption": "نمای نهایی تبلیغ",
+                "visual": "beautiful premium hero shot, product or service as the main focus, clean professional background, cinematic advertising photography",
+            },
         ]
 
     elif project_type == "product":
 
         scenes = [
-            (
-                "معرفی",
-                "با این محصول بیشتر آشنا شوید",
-                subject
-            ),
-            (
-                "نیاز",
-                "اگر به دنبال یک انتخاب بهتر هستید...",
-                subject
-            ),
-            (
-                "محصول",
-                "راه‌حلی ساده و کاربردی",
-                subject
-            ),
-            (
-                "مزیت",
-                "طراحی شده برای استفاده آسان و نتیجه بهتر",
-                subject
-            ),
-            (
-                "نتیجه",
-                "انتخاب مناسب می‌تواند تفاوت ایجاد کند",
-                subject
-            ),
-            (
-                "اقدام",
-                "برای اطلاعات بیشتر با ما تماس بگیرید",
-                subject
-            ),
+            {
+                "title": "معرفی",
+                "caption": "محصول را معرفی می‌کنیم",
+                "visual": "premium product hero shot, realistic studio photography, cinematic lighting, highly detailed",
+            },
+            {
+                "title": "نیاز",
+                "caption": "نیازی که محصول حل می‌کند",
+                "visual": "realistic person experiencing a common everyday problem, natural environment, cinematic photography",
+            },
+            {
+                "title": "استفاده",
+                "caption": "محصول در حال استفاده",
+                "visual": "real person using a modern product naturally, realistic environment, professional commercial photography",
+            },
+            {
+                "title": "جزئیات",
+                "caption": "نمای نزدیک از محصول",
+                "visual": "detailed close-up product photography, realistic materials, premium commercial lighting",
+            },
+            {
+                "title": "نتیجه",
+                "caption": "رضایت مشتری",
+                "visual": "happy customer enjoying the benefits of a product, realistic lifestyle, natural expression, cinematic photography",
+            },
+            {
+                "title": "نمای نهایی",
+                "caption": "محصول در بهترین حالت",
+                "visual": "premium final hero shot of the product, clean elegant background, cinematic commercial photography",
+            },
         ]
 
-    elif project_type == "advertising":
+    elif project_type == "education":
 
         scenes = [
-            (
-                "جذب مخاطب",
-                "دنبال یک انتخاب بهتر هستید؟",
-                subject
-            ),
-            (
-                "مشکل",
-                "وقت آن رسیده راه‌حل بهتری پیدا کنید",
-                subject
-            ),
-            (
-                "راه‌حل",
-                "یک انتخاب حرفه‌ای برای شما",
-                subject
-            ),
-            (
-                "مزیت",
-                "کیفیت، کاربرد و تجربه بهتر",
-                subject
-            ),
-            (
-                "پیشنهاد",
-                "این فرصت را از دست ندهید",
-                subject
-            ),
-            (
-                "اقدام",
-                "همین امروز اطلاعات بیشتری دریافت کنید",
-                subject
-            ),
+            {
+                "title": "شروع آموزش",
+                "caption": "موضوع را معرفی می‌کنیم",
+                "visual": "friendly professional teacher explaining a topic, modern classroom or studio, realistic educational photography",
+            },
+            {
+                "title": "مفهوم اصلی",
+                "caption": "مفهوم اصلی را توضیح می‌دهیم",
+                "visual": "teacher explaining an important concept using a simple visual demonstration, realistic classroom",
+            },
+            {
+                "title": "مثال",
+                "caption": "یک مثال واقعی",
+                "visual": "step by step educational demonstration, realistic hands and objects, clear composition, professional photography",
+            },
+            {
+                "title": "تمرین",
+                "caption": "تمرین عملی",
+                "visual": "student practicing the learned concept, realistic educational environment, natural lighting",
+            },
+            {
+                "title": "نتیجه",
+                "caption": "نتیجه یادگیری",
+                "visual": "successful student understanding the lesson, positive natural expression, realistic educational photography",
+            },
+            {
+                "title": "پایان",
+                "caption": "جمع‌بندی آموزش",
+                "visual": "professional educational studio scene, teacher confidently concluding the lesson, cinematic realistic photography",
+            },
         ]
 
     else:
 
         scenes = [
-            (
-                "شروع",
-                "یک ایده جالب برای شما",
-                subject
-            ),
-            (
-                "موضوع",
-                "بیایید موضوع را بهتر بشناسیم",
-                subject
-            ),
-            (
-                "نکته اول",
-                "این بخش اهمیت زیادی دارد",
-                subject
-            ),
-            (
-                "نکته دوم",
-                "با یک روش ساده می‌توان بهتر عمل کرد",
-                subject
-            ),
-            (
-                "نتیجه",
-                "حالا تصویر کامل‌تری دارید",
-                subject
-            ),
-            (
-                "پایان",
-                "برای مطالب بیشتر همراه ما باشید",
-                subject
-            ),
+            {
+                "title": "شروع",
+                "caption": "شروع داستان",
+                "visual": "cinematic realistic opening scene related to the subject, natural environment, professional photography",
+            },
+            {
+                "title": "موضوع",
+                "caption": "معرفی موضوع",
+                "visual": "realistic scene clearly showing the main subject, cinematic composition",
+            },
+            {
+                "title": "توضیح",
+                "caption": "توضیح بخش مهم",
+                "visual": "realistic detailed scene related to the subject, natural lighting, cinematic photography",
+            },
+            {
+                "title": "جزئیات",
+                "caption": "نمای نزدیک",
+                "visual": "cinematic close-up related to the subject, highly detailed realistic photography",
+            },
+            {
+                "title": "نتیجه",
+                "caption": "نتیجه داستان",
+                "visual": "positive realistic outcome related to the subject, natural people and environment",
+            },
+            {
+                "title": "پایان",
+                "caption": "نمای نهایی",
+                "visual": "beautiful cinematic final scene related to the subject, professional realistic photography",
+            },
         ]
 
     return project_type, scenes
 
 
 # =========================================================
-# نمایش سناریو
+# GENERATE IMAGE
 # =========================================================
 
-def story_to_text(project_type, scenes):
+def generate_image(prompt):
 
-    names = {
-        "advertising": "📢 تبلیغاتی",
-        "education": "🎓 آموزشی",
-        "product": "🛍 معرفی محصول",
-        "general": "🎬 عمومی",
-    }
-
-    result = [
-        "🎬 سناریوی پیشنهادی",
-        "",
-        f"نوع محتوا: {names.get(project_type, '🎬 عمومی')}",
-        "",
-    ]
-
-    for i, (title, main, subject) in enumerate(scenes, 1):
-
-        result.append(
-            f"🎞 صحنه {i} — {title}"
-        )
-
-        result.append(
-            f"📝 {main}"
-        )
-
-        result.append(
-            f"🎯 موضوع: {subject}"
-        )
-
-        result.append("")
-
-    result.append(
-        "اگر سناریو مورد تأیید است، /render را بزن."
+    client = InferenceClient(
+        provider="auto",
+        api_key=HF_TOKEN
     )
 
-    return "\n".join(result)
+    negative_prompt = (
+        "blurry, low quality, distorted face, extra fingers, "
+        "extra limbs, deformed hands, text, watermark, logo, "
+        "cartoon, anime, illustration"
+    )
+
+    image = client.text_to_image(
+        prompt=prompt,
+        model=IMAGE_MODEL,
+        negative_prompt=negative_prompt
+    )
+
+    return image
 
 
 # =========================================================
-# شکستن متن برای نمایش
+# PREPARE IMAGE
 # =========================================================
 
-def wrap_text(draw, text, font, max_width):
+def prepare_image(image, caption, output_file):
 
-    words = text.split()
+    image = image.convert("RGB")
 
+    target_ratio = VIDEO_WIDTH / VIDEO_HEIGHT
+    image_ratio = image.width / image.height
+
+    if image_ratio > target_ratio:
+
+        new_width = int(image.height * target_ratio)
+        left = (image.width - new_width) // 2
+
+        image = image.crop(
+            (
+                left,
+                0,
+                left + new_width,
+                image.height
+            )
+        )
+
+    else:
+
+        new_height = int(image.width / target_ratio)
+        top = (image.height - new_height) // 2
+
+        image = image.crop(
+            (
+                0,
+                top,
+                image.width,
+                top + new_height
+            )
+        )
+
+    image = image.resize(
+        (VIDEO_WIDTH, VIDEO_HEIGHT),
+        Image.Resampling.LANCZOS
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    font = get_font(40)
+
+    margin = 35
+    max_width = VIDEO_WIDTH - 2 * margin
+
+    words = caption.split()
     lines = []
     current = ""
 
     for word in words:
 
-        test = (
-            word
-            if not current
-            else current + " " + word
-        )
+        test = current + " " + word
 
         bbox = draw.textbbox(
             (0, 0),
-            rtl(test),
+            test,
             font=font
         )
 
-        if bbox[2] - bbox[0] <= max_width:
+        if bbox[2] <= max_width:
             current = test
         else:
-
             if current:
-                lines.append(current)
+                lines.append(current.strip())
 
             current = word
 
     if current:
-        lines.append(current)
+        lines.append(current.strip())
 
-    return lines
+    line_height = 55
+    box_height = len(lines) * line_height + 45
 
+    box_top = VIDEO_HEIGHT - box_height - 50
 
-# =========================================================
-# ساخت تصویر صحنه
-# =========================================================
-
-def create_scene(
-    title,
-    main_text,
-    subject,
-    index,
-    output,
-    photo=None
-):
-
-    backgrounds = [
-        (18, 30, 48),
-        (24, 40, 58),
-        (20, 48, 42),
-        (48, 36, 25),
-        (38, 28, 52),
-        (18, 42, 52),
-    ]
-
-    img = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        backgrounds[index]
-    )
-
-    # -----------------------------------------------------
-    # اگر عکس محصول وجود دارد
-    # -----------------------------------------------------
-
-    if photo and os.path.exists(photo):
-
-        try:
-
-            source = Image.open(photo).convert("RGB")
-
-            scale = max(
-                WIDTH / source.width,
-                HEIGHT / source.height
-            )
-
-            new_size = (
-                int(source.width * scale),
-                int(source.height * scale)
-            )
-
-            source = source.resize(
-                new_size,
-                Image.Resampling.LANCZOS
-            )
-
-            left = (
-                source.width - WIDTH
-            ) // 2
-
-            top = (
-                source.height - HEIGHT
-            ) // 2
-
-            source = source.crop(
-                (
-                    left,
-                    top,
-                    left + WIDTH,
-                    top + HEIGHT
-                )
-            )
-
-            img.paste(source)
-
-            overlay = Image.new(
-                "RGBA",
-                (WIDTH, HEIGHT),
-                (0, 0, 0, 110)
-            )
-
-            img = Image.alpha_composite(
-                img.convert("RGBA"),
-                overlay
-            ).convert("RGB")
-
-        except Exception:
-            pass
-
-    draw = ImageDraw.Draw(img)
-
-    # -----------------------------------------------------
-    # تزئین
-    # -----------------------------------------------------
-
-    draw.ellipse(
-        (-180, -150, 300, 330),
-        fill=(50, 80, 105)
-    )
-
-    draw.ellipse(
+    draw.rounded_rectangle(
         (
-            WIDTH - 300,
-            HEIGHT - 300,
-            WIDTH + 180,
-            HEIGHT + 180
+            margin,
+            box_top,
+            VIDEO_WIDTH - margin,
+            VIDEO_HEIGHT - 50
         ),
-        fill=(75, 55, 90)
+        radius=25,
+        fill=(0, 0, 0)
     )
 
-    # -----------------------------------------------------
-    # عنوان
-    # -----------------------------------------------------
-
-    title_font = get_font(38)
-
-    draw.text(
-        (WIDTH // 2, 160),
-        rtl(title),
-        font=title_font,
-        anchor="mm",
-        fill="white"
-    )
-
-    # -----------------------------------------------------
-    # متن اصلی
-    # -----------------------------------------------------
-
-    main_font = get_font(56)
-
-    lines = wrap_text(
-        draw,
-        main_text,
-        main_font,
-        WIDTH - 100
-    )
-
-    lines = lines[:5]
-
-    total_height = len(lines) * 90
-
-    y = (
-        HEIGHT // 2
-        - total_height // 2
-    )
+    y = box_top + 20
 
     for line in lines:
 
-        draw.text(
-            (WIDTH // 2, y),
-            rtl(line),
-            font=main_font,
-            anchor="mm",
-            fill="white",
-            stroke_width=2,
-            stroke_fill=(0, 0, 0)
+        bbox = draw.textbbox(
+            (0, 0),
+            line,
+            font=font
         )
 
-        y += 90
+        text_width = bbox[2] - bbox[0]
 
-    # -----------------------------------------------------
-    # موضوع
-    # -----------------------------------------------------
-
-    subject_font = get_font(28)
-
-    subject_lines = wrap_text(
-        draw,
-        subject,
-        subject_font,
-        WIDTH - 120
-    )
-
-    subject_lines = subject_lines[:2]
-
-    y = HEIGHT - 220
-
-    for line in subject_lines:
+        x = (VIDEO_WIDTH - text_width) // 2
 
         draw.text(
-            (WIDTH // 2, y),
-            rtl(line),
-            font=subject_font,
-            anchor="mm",
-            fill=(235, 235, 235)
+            (x, y),
+            line,
+            font=font,
+            fill=(255, 255, 255)
         )
 
-        y += 42
+        y += line_height
 
-    # -----------------------------------------------------
-    # شماره صحنه
-    # -----------------------------------------------------
-
-    scene_font = get_font(25)
-
-    draw.text(
-        (WIDTH // 2, HEIGHT - 70),
-        rtl(f"صحنه {index + 1} از 6"),
-        font=scene_font,
-        anchor="mm",
-        fill=(210, 210, 210)
-    )
-
-    img.save(
-        output,
-        quality=95
-    )
+    image.save(output_file, quality=95)
 
 
 # =========================================================
-# FFmpeg
+# CREATE VIDEO
 # =========================================================
 
-def run_ffmpeg(command):
+def create_video(image_files, output_file, audio_file=None):
 
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
+    work_dir = output_file.parent
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            result.stderr[-4000:]
-        )
+    clips = []
 
+    for i, image_file in enumerate(image_files):
 
-# =========================================================
-# ساخت ویدئو
-# =========================================================
+        clip = work_dir / f"scene_{i}.mp4"
 
-def create_video(
-    scenes,
-    photo=None,
-    audio=None
-):
+        zoom_direction = "in"
 
-    workdir = Path(
-        tempfile.mkdtemp(
-            prefix="ai_video_"
-        )
-    )
+        if i % 2 == 1:
+            zoom_direction = "out"
 
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        if zoom_direction == "in":
 
-    parts = []
-
-    for i, (title, main_text, subject) in enumerate(scenes):
-
-        image_path = (
-            workdir / f"scene_{i}.jpg"
-        )
-
-        video_path = (
-            workdir / f"scene_{i}.mp4"
-        )
-
-        create_scene(
-            title,
-            main_text,
-            subject,
-            i,
-            str(image_path),
-            photo
-        )
-
-        command = [
-            ffmpeg,
-            "-y",
-
-            "-loop",
-            "1",
-
-            "-i",
-            str(image_path),
-
-            "-t",
-            str(SCENE_DURATION),
-
-            "-vf",
-
-            (
+            vf = (
+                "scale=720:1280,"
                 "zoompan="
-                "z='min(zoom+0.0015,1.12)':"
-                "d=75:"
-                f"s={WIDTH}x{HEIGHT}:"
-                f"fps={FPS},"
-                "fade=t=in:st=0:d=0.3,"
-                "fade=t=out:st=4.7:d=0.3"
-            ),
-
-            "-an",
-
-            "-c:v",
-            "libx264",
-
-            "-pix_fmt",
-            "yuv420p",
-
-            "-movflags",
-            "+faststart",
-
-            str(video_path)
-        ]
-
-        run_ffmpeg(command)
-
-        parts.append(video_path)
-
-    # -----------------------------------------------------
-    # اتصال صحنه‌ها
-    # -----------------------------------------------------
-
-    list_file = (
-        workdir / "list.txt"
-    )
-
-    with open(
-        list_file,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        for part in parts:
-
-            f.write(
-                f"file '{part.as_posix()}'\n"
+                "z='min(zoom+0.0008,1.12)':"
+                "x='iw/2-(iw/zoom/2)':"
+                "y='ih/2-(ih/zoom/2)':"
+                "d=150:"
+                "s=720x1280:"
+                "fps=30"
             )
 
-    joined = (
-        workdir / "joined.mp4"
-    )
+        else:
 
-    run_ffmpeg([
-        ffmpeg,
+            vf = (
+                "scale=720:1280,"
+                "zoompan="
+                "z='if(eq(on,1),1.12,max(zoom-0.0008,1.0))':"
+                "x='iw/2-(iw/zoom/2)':"
+                "y='ih/2-(ih/zoom/2)':"
+                "d=150:"
+                "s=720x1280:"
+                "fps=30"
+            )
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            str(image_file),
+            "-vf",
+            vf,
+            "-t",
+            str(SCENE_SECONDS),
+            "-r",
+            "30",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            str(clip)
+        ]
+
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        clips.append(clip)
+
+    concat_file = work_dir / "concat.txt"
+
+    with open(concat_file, "w", encoding="utf-8") as f:
+
+        for clip in clips:
+            f.write(f"file '{clip.resolve()}'\n")
+
+    silent_video = work_dir / "silent.mp4"
+
+    cmd = [
+        "ffmpeg",
         "-y",
         "-f",
         "concat",
         "-safe",
         "0",
         "-i",
-        str(list_file),
+        str(concat_file),
         "-c",
         "copy",
-        str(joined)
-    ])
+        str(silent_video)
+    ]
 
-    # -----------------------------------------------------
-    # افزودن صدا
-    # -----------------------------------------------------
+    subprocess.run(
+        cmd,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
-    if audio and os.path.exists(audio):
+    if audio_file and audio_file.exists():
 
-        final = (
-            workdir / "final.mp4"
-        )
-
-        run_ffmpeg([
-            ffmpeg,
+        cmd = [
+            "ffmpeg",
             "-y",
-
             "-i",
-            str(joined),
-
+            str(silent_video),
             "-i",
-            str(audio),
-
-            "-filter_complex",
-            "[1:a]apad,atrim=0:30[a]",
-
+            str(audio_file),
             "-map",
             "0:v",
-
             "-map",
-            "[a]",
-
+            "1:a",
             "-c:v",
             "copy",
-
             "-c:a",
             "aac",
-
             "-shortest",
+            str(output_file)
+        ]
 
-            str(final)
-        ])
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
 
-        return str(final)
+    else:
 
-    return str(joined)
+        silent_video.replace(output_file)
 
 
 # =========================================================
-# /start
+# /START
 # =========================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    message = """
-🎬 ربات ساخت ویدئو آماده است!
+    user_id = update.effective_user.id
 
-من می‌توانم برایت ویدئوهای:
-
-📢 تبلیغاتی
-🛍 معرفی محصول
-🎓 آموزشی
-📱 اینستاگرامی
-
-بسازم.
-
-روش کار:
-
-1️⃣ متن یا ایده را بفرست
-2️⃣ اگر عکس محصول داری، عکس را بفرست
-3️⃣ اگر گویندگی داری، MP3 یا Voice بفرست
-4️⃣ من سناریو را می‌سازم
-5️⃣ اگر تأیید کردی /render را بزن
-
-دستورها:
-
-/render
-ساخت ویدئو
-
-/clear
-پاک کردن پروژه فعلی
-"""
+    user_projects.pop(user_id, None)
 
     await update.message.reply_text(
-        message
+        "🎬 سلام!\n\n"
+        "ایده ویدیویی خودت را برای من بنویس.\n\n"
+        "مثلاً:\n"
+        "«برای یک کود گیاهی تبلیغ بساز که به کشاورزان معرفی شود.»\n\n"
+        "یا:\n"
+        "«یک ویدیوی آموزشی درباره نحوه نگهداری گل بساز.»\n\n"
+        "بعد از ساخت سناریو، با دستور /render ویدیو ساخته می‌شود."
     )
 
 
 # =========================================================
-# دریافت متن
+# /CLEAR
 # =========================================================
 
-async def receive_text(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    user_projects.pop(user_id, None)
+
+    await update.message.reply_text(
+        "🗑 پروژه پاک شد.\n\n"
+        "حالا ایده جدیدت را بفرست."
+    )
+
+
+# =========================================================
+# TEXT
+# =========================================================
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user_id = update.effective_user.id
 
     text = update.message.text.strip()
 
-    project_type, scenes = create_story(text)
+    if not text:
+        return
 
-    drafts[chat_id] = {
+    project_type, scenes = create_storyboard(text)
+
+    user_projects[user_id] = {
         "text": text,
         "type": project_type,
         "scenes": scenes,
+        "photo": None,
+        "audio": None,
     }
 
-    story = story_to_text(
-        project_type,
-        scenes
+    message = "🎬 سناریوی پیشنهادی آماده شد:\n\n"
+
+    for i, scene in enumerate(scenes, 1):
+
+        message += (
+            f"🎞 صحنه {i}: {scene['title']}\n"
+            f"📝 {scene['caption']}\n\n"
+        )
+
+    message += (
+        "اگر سناریو را می‌پسندی، دستور زیر را بفرست:\n\n"
+        "👉 /render\n\n"
+        "برای شروع پروژه جدید:\n"
+        "👉 /clear"
     )
 
-    await update.message.reply_text(
-        story
-    )
+    await update.message.reply_text(message)
 
 
 # =========================================================
-# دریافت عکس
+# PHOTO
 # =========================================================
 
-async def receive_photo(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
 
-    if chat_id not in drafts:
-        drafts[chat_id] = {}
-
-    photo = update.message.photo[-1]
-
-    file = await context.bot.get_file(
-        photo.file_id
-    )
-
-    workdir = Path(
-        tempfile.mkdtemp(
-            prefix="product_photo_"
-        )
-    )
-
-    path = (
-        workdir / "product.jpg"
-    )
-
-    await file.download_to_drive(
-        str(path)
-    )
-
-    drafts[chat_id]["photo"] = str(path)
-
-    if update.message.caption:
-
-        text = update.message.caption.strip()
-
-        project_type, scenes = create_story(
-            text
-        )
-
-        drafts[chat_id]["text"] = text
-        drafts[chat_id]["type"] = project_type
-        drafts[chat_id]["scenes"] = scenes
-
-        story = story_to_text(
-            project_type,
-            scenes
-        )
+    if user_id not in user_projects:
 
         await update.message.reply_text(
-            "🖼️ عکس دریافت شد.\n\n"
-            + story
-        )
-
-    else:
-
-        await update.message.reply_text(
-            "🖼️ عکس محصول دریافت شد.\n"
-            "حالا متن را بفرست."
-        )
-
-
-# =========================================================
-# دریافت صدا
-# =========================================================
-
-async def receive_audio(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    chat_id = update.effective_chat.id
-
-    if chat_id not in drafts:
-        drafts[chat_id] = {}
-
-    if update.message.audio:
-
-        file_id = (
-            update.message.audio.file_id
-        )
-
-        extension = ".mp3"
-
-    else:
-
-        file_id = (
-            update.message.voice.file_id
-        )
-
-        extension = ".ogg"
-
-    file = await context.bot.get_file(
-        file_id
-    )
-
-    workdir = Path(
-        tempfile.mkdtemp(
-            prefix="voice_"
-        )
-    )
-
-    path = (
-        workdir / f"voice{extension}"
-    )
-
-    await file.download_to_drive(
-        str(path)
-    )
-
-    drafts[chat_id]["audio"] = str(path)
-
-    await update.message.reply_text(
-        "🔊 گویندگی دریافت شد.\n"
-        "اگر سناریو را تأیید کرده‌ای، /render را بزن."
-    )
-
-
-# =========================================================
-# /clear
-# =========================================================
-
-async def clear(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    drafts.pop(
-        update.effective_chat.id,
-        None
-    )
-
-    await update.message.reply_text(
-        "🗑 پروژه فعلی پاک شد."
-    )
-
-
-# =========================================================
-# /render
-# =========================================================
-
-async def render(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    chat_id = update.effective_chat.id
-
-    draft = drafts.get(chat_id)
-
-    if not draft or not draft.get("scenes"):
-
-        await update.message.reply_text(
-            "❌ هنوز سناریویی نداریم.\n"
-            "اول متن یا ایده را بفرست."
+            "اول ایده ویدیویی را به صورت متن بفرست."
         )
 
         return
 
+    photo = update.message.photo[-1]
+
+    file = await context.bot.get_file(photo.file_id)
+
+    photo_path = BASE_DIR / f"user_{user_id}_photo.jpg"
+
+    await file.download_to_drive(photo_path)
+
+    user_projects[user_id]["photo"] = photo_path
+
     await update.message.reply_text(
-        "🎬 سناریو تأیید شد.\n\n"
-        "در حال ساخت ویدئو هستم...\n"
-        "⏳ لطفاً صبر کن."
+        "📷 عکس دریافت شد.\n\n"
+        "فعلاً در تولید تصویر به عنوان مرجع پروژه ذخیره شده است.\n"
+        "حالا /render را بفرست."
     )
+
+
+# =========================================================
+# AUDIO
+# =========================================================
+
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user_id = update.effective_user.id
+
+    if user_id not in user_projects:
+
+        await update.message.reply_text(
+            "اول ایده ویدیویی را بفرست."
+        )
+
+        return
+
+    audio = update.message.audio or update.message.voice
+
+    if not audio:
+        return
+
+    file = await context.bot.get_file(audio.file_id)
+
+    audio_path = BASE_DIR / f"user_{user_id}_audio.ogg"
+
+    await file.download_to_drive(audio_path)
+
+    user_projects[user_id]["audio"] = audio_path
+
+    await update.message.reply_text(
+        "🎵 فایل صوتی دریافت شد.\n"
+        "در خروجی ویدیو استفاده می‌شود."
+    )
+
+
+# =========================================================
+# /RENDER
+# =========================================================
+
+async def render(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user_id = update.effective_user.id
+
+    if user_id not in user_projects:
+
+        await update.message.reply_text(
+            "❗ ابتدا ایده ویدیویی خودت را بفرست."
+        )
+
+        return
+
+    if not HF_TOKEN:
+
+        await update.message.reply_text(
+            "❌ توکن Hugging Face پیدا نشد.\n\n"
+            "بررسی کن Secret زیر در GitHub ساخته شده باشد:\n"
+            "HF_TOKEN"
+        )
+
+        return
+
+    project = user_projects[user_id]
+
+    await update.message.reply_text(
+        "⏳ ساخت ویدیو شروع شد...\n\n"
+        "🧠 سناریو آماده است\n"
+        "🎨 در حال تولید تصاویر AI\n"
+        "🎬 سپس تصاویر به ویدیو تبدیل می‌شوند.\n\n"
+        "ممکن است چند دقیقه طول بکشد."
+    )
+
+    work_dir = BASE_DIR / f"user_{user_id}"
+
+    work_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    image_files = []
 
     try:
 
-        video = await asyncio.to_thread(
-            create_video,
-            draft["scenes"],
-            draft.get("photo"),
-            draft.get("audio")
-        )
+        for i, scene in enumerate(project["scenes"], 1):
 
-        with open(
-            video,
-            "rb"
-        ) as f:
-
-            await update.message.reply_video(
-                video=f,
-                caption=(
-                    "🎬 ویدئو آماده شد!\n\n"
-                    "نسخه فعلی: موشن‌گرافیک"
-                ),
-                supports_streaming=True
+            await update.message.reply_text(
+                f"🎨 تولید تصویر {i}/{SCENE_COUNT} ..."
             )
 
-        drafts.pop(
-            chat_id,
-            None
+            prompt = (
+                f"{scene['visual']}. "
+                f"The subject is: {project['text']}. "
+                "Vertical 9:16 composition, realistic photography, "
+                "natural human proportions, coherent visual storytelling, "
+                "high detail, professional cinematic lighting, "
+                "no written text in the image."
+            )
+
+            image = await asyncio.to_thread(
+                generate_image,
+                prompt
+            )
+
+            image_file = work_dir / f"image_{i}.jpg"
+
+            await asyncio.to_thread(
+                prepare_image,
+                image,
+                scene["caption"],
+                image_file
+            )
+
+            image_files.append(image_file)
+
+        await update.message.reply_text(
+            "🎬 تصاویر آماده شدند.\n"
+            "در حال ساخت ویدیوی نهایی..."
         )
+
+        output_file = work_dir / "final_video.mp4"
+
+        audio_file = project.get("audio")
+
+        await asyncio.to_thread(
+            create_video,
+            image_files,
+            output_file,
+            audio_file
+        )
+
+        if output_file.exists():
+
+            await update.message.reply_video(
+                video=output_file.open("rb"),
+                caption=(
+                    "🎬 ویدیوی شما آماده شد.\n\n"
+                    "ساخته‌شده با AI"
+                )
+            )
+
+        else:
+
+            await update.message.reply_text(
+                "❌ فایل ویدیو ساخته نشد."
+            )
 
     except Exception as e:
 
+        print("ERROR:", repr(e))
+
         await update.message.reply_text(
-            "❌ خطا هنگام ساخت ویدئو:\n\n"
-            + str(e)[-3000:]
+            "❌ هنگام ساخت ویدیو خطایی رخ داد.\n\n"
+            f"{str(e)[:1000]}"
         )
 
 
 # =========================================================
-# اجرای ربات
+# MAIN
 # =========================================================
 
 def main():
@@ -1058,64 +829,51 @@ def main():
     if not BOT_TOKEN:
 
         raise RuntimeError(
-            "BOT_TOKEN تنظیم نشده است."
+            "BOT_TOKEN is missing."
         )
 
-    app = (
-        ApplicationBuilder()
+    application = (
+        Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+    application.add_handler(
+        CommandHandler("start", start)
     )
 
-    app.add_handler(
-        CommandHandler(
-            "clear",
-            clear
-        )
+    application.add_handler(
+        CommandHandler("clear", clear)
     )
 
-    app.add_handler(
-        CommandHandler(
-            "render",
-            render
-        )
+    application.add_handler(
+        CommandHandler("render", render)
     )
 
-    app.add_handler(
+    application.add_handler(
         MessageHandler(
             filters.PHOTO,
-            receive_photo
+            handle_photo
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         MessageHandler(
             filters.AUDIO | filters.VOICE,
-            receive_audio
+            handle_audio
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            receive_text
+            handle_text
         )
     )
 
-    print(
-        "AI Video Telegram Bot is running..."
-    )
+    print("🤖 AI Video Bot is running...")
 
-    app.run_polling(
-        drop_pending_updates=True
-    )
+    application.run_polling()
 
 
 if __name__ == "__main__":
