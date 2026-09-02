@@ -1,5 +1,8 @@
 import os
+import io
 import asyncio
+import requests
+import subprocess
 from pathlib import Path
 
 from telegram import (
@@ -16,6 +19,9 @@ from telegram.ext import (
     filters,
 )
 
+from PIL import Image, ImageDraw, ImageFont
+
+
 # =========================================================
 # SETTINGS
 # =========================================================
@@ -25,10 +31,12 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BASE_DIR = Path("video_work")
 BASE_DIR.mkdir(exist_ok=True)
 
-# ذخیره پروژه‌های کاربران
-user_projects = {}
+VIDEO_WIDTH = 720
+VIDEO_HEIGHT = 1280
+SCENE_SECONDS = 5
+SCENE_COUNT = 6
 
-# ذخیره پیام‌هایی که ربات در طول اجرای خودش می‌بیند
+user_projects = {}
 user_messages = {}
 
 
@@ -37,43 +45,40 @@ user_messages = {}
 # =========================================================
 
 def remember_message(user_id, message_id):
+
     if user_id not in user_messages:
         user_messages[user_id] = []
 
     user_messages[user_id].append(message_id)
 
-    # فقط 100 پیام آخر
     user_messages[user_id] = user_messages[user_id][-100:]
 
 
 async def send_message(update, text, **kwargs):
-    """
-    ارسال پیام و ذخیره ID آن برای پاک کردن بعدی
-    """
 
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
 
     message = await update.effective_chat.send_message(
         text=text,
         **kwargs
     )
 
-    remember_message(user_id, message.message_id)
+    remember_message(
+        user_id,
+        message.message_id
+    )
 
     return message
 
 
 async def delete_old_messages(bot, chat_id, user_id):
-    """
-    پاک کردن پیام‌هایی که ربات از زمان اجرای فعلی به خاطر دارد.
-    """
 
     messages = user_messages.get(user_id, [])
 
     for message_id in messages:
 
         try:
+
             await bot.delete_message(
                 chat_id=chat_id,
                 message_id=message_id
@@ -86,12 +91,12 @@ async def delete_old_messages(bot, chat_id, user_id):
 
 
 # =========================================================
-# KEYBOARD
+# KEYBOARDS
 # =========================================================
 
 def main_keyboard():
 
-    keyboard = [
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "🚀 شروع ساخت ویدیو",
@@ -104,14 +109,12 @@ def main_keyboard():
                 callback_data="clear_project"
             )
         ]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
+    ])
 
 
 def after_idea_keyboard():
 
-    keyboard = [
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "🎬 ساخت ویدیو",
@@ -130,38 +133,543 @@ def after_idea_keyboard():
                 callback_data="clear_project"
             )
         ]
+    ])
+
+
+# =========================================================
+# IMAGE GENERATOR
+# =========================================================
+
+def generate_image(prompt):
+
+    url = (
+        "https://image.pollinations.ai/prompt/"
+        + requests.utils.quote(prompt)
+    )
+
+    params = {
+        "model": "flux",
+        "width": VIDEO_WIDTH,
+        "height": VIDEO_HEIGHT,
+        "nologo": "true",
+    }
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=180
+    )
+
+    response.raise_for_status()
+
+    image = Image.open(
+        io.BytesIO(response.content)
+    ).convert("RGB")
+
+    return image
+
+
+# =========================================================
+# CREATE SCENE IMAGE
+# =========================================================
+
+async def create_scene_image(
+    prompt,
+    output_path
+):
+
+    loop = asyncio.get_running_loop()
+
+    image = await loop.run_in_executor(
+        None,
+        generate_image,
+        prompt
+    )
+
+    image.save(
+        output_path,
+        "JPEG",
+        quality=92
+    )
+
+    return output_path
+
+
+# =========================================================
+# FONT
+# =========================================================
+
+def get_font(size):
+
+    possible_fonts = [
+
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+
     ]
 
-    return InlineKeyboardMarkup(keyboard)
+    for font_path in possible_fonts:
+
+        if os.path.exists(font_path):
+
+            try:
+
+                return ImageFont.truetype(
+                    font_path,
+                    size
+                )
+
+            except Exception:
+                pass
+
+    return ImageFont.load_default()
+
+
+# =========================================================
+# ADD TEXT TO IMAGE
+# =========================================================
+
+def add_text_to_image(
+    image,
+    text
+):
+
+    image = image.copy()
+
+    draw = ImageDraw.Draw(image)
+
+    font = get_font(42)
+
+    margin = 35
+
+    max_width = VIDEO_WIDTH - (margin * 2)
+
+    words = text.split()
+
+    lines = []
+    current = ""
+
+    for word in words:
+
+        test = (
+            current + " " + word
+        ).strip()
+
+        bbox = draw.textbbox(
+            (0, 0),
+            test,
+            font=font
+        )
+
+        if bbox[2] <= max_width:
+
+            current = test
+
+        else:
+
+            if current:
+                lines.append(current)
+
+            current = word
+
+    if current:
+        lines.append(current)
+
+    if not lines:
+        return image
+
+    line_height = 55
+
+    box_height = (
+        len(lines) * line_height
+        + 40
+    )
+
+    y = VIDEO_HEIGHT - box_height - 40
+
+    draw.rounded_rectangle(
+        (
+            20,
+            y,
+            VIDEO_WIDTH - 20,
+            VIDEO_HEIGHT - 20
+        ),
+        radius=25,
+        fill=(0, 0, 0)
+    )
+
+    for line in lines:
+
+        bbox = draw.textbbox(
+            (0, 0),
+            line,
+            font=font
+        )
+
+        text_width = bbox[2] - bbox[0]
+
+        x = (
+            VIDEO_WIDTH
+            - text_width
+        ) // 2
+
+        draw.text(
+            (x, y + 20),
+            line,
+            font=font,
+            fill=(255, 255, 255)
+        )
+
+        y += line_height
+
+    return image
+
+
+# =========================================================
+# CREATE VIDEO
+# =========================================================
+
+def create_video_from_images(
+    image_paths,
+    output_path
+):
+
+    frames_dir = (
+        output_path.parent
+        / "frames"
+    )
+
+    frames_dir.mkdir(
+        exist_ok=True
+    )
+
+    frame_paths = []
+
+    for scene_index, image_path in enumerate(
+        image_paths
+    ):
+
+        image = Image.open(
+            image_path
+        ).convert("RGB")
+
+        image = image.resize(
+            (
+                VIDEO_WIDTH,
+                VIDEO_HEIGHT
+            )
+        )
+
+        # ---------------------------------------------
+        # Create zoom effect
+        # ---------------------------------------------
+
+        frame_count = (
+            SCENE_SECONDS * 24
+        )
+
+        for frame_number in range(
+            frame_count
+        ):
+
+            progress = (
+                frame_number
+                / max(frame_count - 1, 1)
+            )
+
+            zoom = 1.0 + (
+                progress * 0.08
+            )
+
+            crop_w = int(
+                VIDEO_WIDTH / zoom
+            )
+
+            crop_h = int(
+                VIDEO_HEIGHT / zoom
+            )
+
+            left = (
+                VIDEO_WIDTH - crop_w
+            ) // 2
+
+            top = (
+                VIDEO_HEIGHT - crop_h
+            ) // 2
+
+            frame = image.crop(
+                (
+                    left,
+                    top,
+                    left + crop_w,
+                    top + crop_h
+                )
+            )
+
+            frame = frame.resize(
+                (
+                    VIDEO_WIDTH,
+                    VIDEO_HEIGHT
+                ),
+                Image.Resampling.LANCZOS
+            )
+
+            frame_file = (
+                frames_dir
+                / f"scene_{scene_index:02d}_"
+                f"{frame_number:04d}.jpg"
+            )
+
+            frame.save(
+                frame_file,
+                "JPEG",
+                quality=90
+            )
+
+            frame_paths.append(
+                frame_file
+            )
+
+    concat_file = (
+        output_path.parent
+        / "frames.txt"
+    )
+
+    with open(
+        concat_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        for frame in frame_paths:
+
+            f.write(
+                f"file '{frame.resolve()}'\n"
+            )
+
+    command = [
+
+        "ffmpeg",
+
+        "-y",
+
+        "-f",
+        "concat",
+
+        "-safe",
+        "0",
+
+        "-i",
+        str(concat_file),
+
+        "-vf",
+        "fps=24",
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "veryfast",
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-movflags",
+        "+faststart",
+
+        str(output_path)
+    ]
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+
+        raise RuntimeError(
+            result.stderr[-3000:]
+        )
+
+    return output_path
+
+
+# =========================================================
+# BUILD VIDEO
+# =========================================================
+
+async def build_video(
+    user_id,
+    bot,
+    chat_id
+):
+
+    project = user_projects.get(
+        user_id
+    )
+
+    if not project:
+        raise RuntimeError(
+            "Project not found."
+        )
+
+    idea = project["idea"]
+
+    project_dir = (
+        BASE_DIR
+        / str(user_id)
+    )
+
+    project_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    image_paths = []
+
+    scenes = [
+
+        f"""
+        cinematic vertical video,
+        realistic professional photography,
+        opening scene about:
+        {idea},
+        natural lighting,
+        highly detailed,
+        realistic,
+        professional advertising style
+        """,
+
+        f"""
+        cinematic vertical scene,
+        realistic farmers and agriculture,
+        showing the main subject:
+        {idea},
+        professional commercial photography,
+        natural environment,
+        highly detailed
+        """,
+
+        f"""
+        close-up cinematic scene,
+        realistic details,
+        showing an important aspect of:
+        {idea},
+        professional advertising,
+        natural colors,
+        photorealistic
+        """,
+
+        f"""
+        realistic agricultural scene,
+        practical real-world example of:
+        {idea},
+        cinematic composition,
+        professional commercial video,
+        highly detailed
+        """,
+
+        f"""
+        beautiful cinematic scene,
+        successful result related to:
+        {idea},
+        realistic agriculture,
+        professional advertising photography,
+        natural lighting
+        """,
+
+        f"""
+        final cinematic advertising scene about:
+        {idea},
+        optimistic ending,
+        beautiful realistic agricultural environment,
+        professional commercial photography,
+        highly detailed
+        """
+    ]
+
+    for index, scene_prompt in enumerate(
+        scenes,
+        start=1
+    ):
+
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🖼 ساخت تصویر "
+                f"{index}/{SCENE_COUNT}..."
+            )
+        )
+
+        output_path = (
+            project_dir
+            / f"scene_{index}.jpg"
+        )
+
+        await create_scene_image(
+            scene_prompt,
+            output_path
+        )
+
+        image_paths.append(
+            output_path
+        )
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text="🎞 تصاویر آماده شدند.\nدر حال ساخت ویدیو..."
+    )
+
+    video_path = (
+        project_dir
+        / "final_video.mp4"
+    )
+
+    loop = asyncio.get_running_loop()
+
+    await loop.run_in_executor(
+        None,
+        create_video_from_images,
+        image_paths,
+        video_path
+    )
+
+    return video_path
 
 
 # =========================================================
 # START
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user_id = update.effective_user.id
+
     chat_id = update.effective_chat.id
 
-    # پاک کردن پروژه قبلی
-    user_projects.pop(user_id, None)
+    user_projects.pop(
+        user_id,
+        None
+    )
 
-    # پاک کردن پیام‌های قبلی که ربات می‌شناسد
     await delete_old_messages(
         context.bot,
         chat_id,
         user_id
     )
 
-    text = (
-        "🎬 سلام!\n\n"
-        "به ربات ساخت ویدیو خوش آمدی.\n\n"
-        "برای شروع روی دکمه زیر بزن:"
-    )
-
     message = await update.effective_chat.send_message(
-        text=text,
+        text=(
+            "🎬 سلام!\n\n"
+            "به ربات ساخت ویدیو خوش آمدی.\n\n"
+            "برای شروع روی دکمه زیر بزن:"
+        ),
         reply_markup=main_keyboard()
     )
 
@@ -175,7 +683,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # BUTTON HANDLER
 # =========================================================
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
 
@@ -183,37 +694,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
 
-    # -----------------------------------------------------
+    # =====================================================
     # START VIDEO
-    # -----------------------------------------------------
+    # =====================================================
 
     if query.data == "start_video":
 
         user_projects[user_id] = {
+
             "idea": None,
+
             "storyboard": None,
+
             "status": "waiting_for_idea"
+
         }
 
         await query.edit_message_text(
             text=(
                 "🎬 ساخت ویدیو\n\n"
                 "لطفاً ایده یا موضوع ویدیوت را بنویس.\n\n"
-                "مثلاً:\n"
-                "«یک ویدیوی جذاب درباره کشاورزی مدرن و "
-                "استفاده از هوش مصنوعی در کشاورزی»"
+                "مثلاً:\n\n"
+                "یک تبلیغ حرفه‌ای برای کود "
+                "گیاهی ارگانیک بساز."
             )
         )
 
         return
 
-    # -----------------------------------------------------
-    # CLEAR PROJECT
-    # -----------------------------------------------------
+    # =====================================================
+    # CLEAR
+    # =====================================================
 
     if query.data == "clear_project":
 
-        user_projects.pop(user_id, None)
+        user_projects.pop(
+            user_id,
+            None
+        )
 
         await delete_old_messages(
             context.bot,
@@ -237,20 +755,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # MAKE VIDEO
-    # -----------------------------------------------------
+    # =====================================================
 
     if query.data == "make_video":
 
-        project = user_projects.get(user_id)
+        project = user_projects.get(
+            user_id
+        )
 
-        if not project or not project.get("idea"):
+        if not project:
 
             await query.edit_message_text(
                 text=(
-                    "⚠️ هنوز ایده‌ای دریافت نکرده‌ام.\n\n"
-                    "لطفاً ابتدا ایده ویدیوت را ارسال کن."
+                    "⚠️ پروژه‌ای وجود ندارد.\n\n"
+                    "ابتدا روی شروع ساخت ویدیو بزن."
+                ),
+                reply_markup=main_keyboard()
+            )
+
+            return
+
+        if not project.get("idea"):
+
+            await query.edit_message_text(
+                text=(
+                    "⚠️ هنوز ایده‌ای دریافت نکرده‌ام."
                 ),
                 reply_markup=main_keyboard()
             )
@@ -259,25 +790,67 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             text=(
-                "⏳ درخواست ساخت ویدیو دریافت شد.\n\n"
-                "⚠️ موتور ساخت تصویر هنوز فعال نشده است.\n\n"
-                "فعلاً ارتباط ربات را تست می‌کنیم تا مطمئن شویم "
-                "ربات بدون خطا کار می‌کند."
+                "🚀 شروع ساخت ویدیو...\n\n"
+                "لطفاً صبر کن."
             )
         )
+
+        try:
+
+            video_path = await build_video(
+                user_id,
+                context.bot,
+                query.message.chat_id
+            )
+
+            with open(
+                video_path,
+                "rb"
+            ) as video_file:
+
+                sent = await context.bot.send_video(
+                    chat_id=query.message.chat_id,
+                    video=video_file,
+                    caption=(
+                        "🎉 ویدیوی شما آماده شد!"
+                    ),
+                    supports_streaming=True
+                )
+
+            remember_message(
+                user_id,
+                sent.message_id
+            )
+
+        except Exception as error:
+
+            print(
+                "VIDEO ERROR:",
+                repr(error)
+            )
+
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    "❌ هنگام ساخت ویدیو خطایی رخ داد.\n\n"
+                    f"جزئیات:\n{str(error)[:1500]}"
+                )
+            )
 
         return
 
 
 # =========================================================
-# IDEA HANDLER
+# TEXT HANDLER
 # =========================================================
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user_id = update.effective_user.id
 
-    # ذخیره پیام کاربر
     remember_message(
         user_id,
         update.message.message_id
@@ -288,7 +861,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # اگر پروژه‌ای وجود ندارد
     if user_id not in user_projects:
 
         await send_message(
@@ -300,69 +872,72 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     project = user_projects[user_id]
 
-    # -----------------------------------------------------
-    # انتظار برای ایده
-    # -----------------------------------------------------
+    # =====================================================
+    # RECEIVE IDEA
+    # =====================================================
 
     if project.get("status") == "waiting_for_idea":
 
         project["idea"] = text
+
         project["status"] = "idea_received"
 
-        # فعلاً یک استوری‌بورد ساده ایجاد می‌کنیم
-        storyboard = [
+        project["storyboard"] = [
+
             {
                 "scene": 1,
-                "description": f"شروع ویدیو درباره: {text}"
+                "description":
+                    f"شروع ویدیو درباره {text}"
             },
+
             {
                 "scene": 2,
-                "description": f"نمایش موضوع اصلی: {text}"
+                "description":
+                    f"معرفی موضوع {text}"
             },
+
             {
                 "scene": 3,
-                "description": f"توضیح مهم درباره: {text}"
+                "description":
+                    f"توضیح اصلی درباره {text}"
             },
+
             {
                 "scene": 4,
-                "description": f"یک مثال واقعی درباره: {text}"
+                "description":
+                    f"مثال واقعی درباره {text}"
             },
+
             {
                 "scene": 5,
-                "description": f"جمع‌بندی موضوع: {text}"
+                "description":
+                    f"نتیجه و مزایای {text}"
             },
+
             {
                 "scene": 6,
-                "description": f"پایان ویدیو درباره: {text}"
+                "description":
+                    f"جمع‌بندی {text}"
             }
         ]
 
-        project["storyboard"] = storyboard
-
-        response = (
-            "✅ ایده دریافت شد!\n\n"
-            f"💡 ایده:\n{text}\n\n"
-            "📋 سناریوی اولیه آماده شد:\n\n"
-            "🎬 صحنه 1 — شروع موضوع\n"
-            "🎬 صحنه 2 — معرفی موضوع\n"
-            "🎬 صحنه 3 — توضیح اصلی\n"
-            "🎬 صحنه 4 — مثال\n"
-            "🎬 صحنه 5 — جمع‌بندی\n"
-            "🎬 صحنه 6 — پایان\n\n"
-            "حالا می‌توانیم وارد مرحله ساخت ویدیو شویم."
-        )
-
         await send_message(
             update,
-            response,
+            (
+                "✅ ایده دریافت شد!\n\n"
+                f"💡 {text}\n\n"
+                "📋 سناریوی اولیه آماده شد.\n\n"
+                "۶ صحنه برای ویدیو در نظر گرفته شده است.\n\n"
+                "اگر آماده‌ای، روی دکمه زیر بزن:"
+            ),
             reply_markup=after_idea_keyboard()
         )
 
         return
 
-    # -----------------------------------------------------
-    # اگر ایده قبلاً دریافت شده
-    # -----------------------------------------------------
+    # =====================================================
+    # NEW IDEA
+    # =====================================================
 
     if project.get("status") == "idea_received":
 
@@ -371,24 +946,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_message(
             update,
             (
-                "✅ ایده جدید جایگزین شد.\n\n"
+                "✅ ایده جدید ثبت شد.\n\n"
                 f"💡 {text}\n\n"
-                "برای ادامه روی «🎬 ساخت ویدیو» بزن."
+                "برای ساخت ویدیو روی دکمه زیر بزن."
             ),
             reply_markup=after_idea_keyboard()
         )
 
         return
 
-    # -----------------------------------------------------
-    # وضعیت نامشخص
-    # -----------------------------------------------------
-
     await send_message(
         update,
         (
             "پیامت دریافت شد ✅\n\n"
-            "برای شروع یک پروژه جدید، /start را بزن."
+            "برای شروع پروژه جدید /start را بزن."
         ),
         reply_markup=main_keyboard()
     )
@@ -398,17 +969,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ERROR HANDLER
 # =========================================================
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+async def error_handler(
+    update,
+    context
+):
 
     print("====================================")
     print("BOT ERROR")
     print("====================================")
-
-    try:
-        print(context.error)
-    except Exception:
-        pass
-
+    print(repr(context.error))
     print("====================================")
 
 
@@ -420,7 +989,10 @@ def main():
 
     if not BOT_TOKEN:
 
-        print("ERROR: BOT_TOKEN is not set.")
+        print(
+            "ERROR: BOT_TOKEN is not set."
+        )
+
         return
 
     print("====================================")
@@ -434,7 +1006,6 @@ def main():
         .build()
     )
 
-    # Commands
     application.add_handler(
         CommandHandler(
             "start",
@@ -442,14 +1013,12 @@ def main():
         )
     )
 
-    # Buttons
     application.add_handler(
         CallbackQueryHandler(
             button_handler
         )
     )
 
-    # Text
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -457,13 +1026,17 @@ def main():
         )
     )
 
-    # Errors
     application.add_error_handler(
         error_handler
     )
 
-    print("Bot is running...")
-    print("Waiting for Telegram messages...")
+    print(
+        "Bot is running..."
+    )
+
+    print(
+        "Waiting for Telegram messages..."
+    )
 
     application.run_polling(
         drop_pending_updates=True
@@ -475,4 +1048,5 @@ def main():
 # =========================================================
 
 if __name__ == "__main__":
+
     main()
