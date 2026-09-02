@@ -2,3 +2,5 @@ python-telegram-bot>=22,<23
 Pillow>=10
 imageio-ffmpeg>=0.5
 requests>=2.31
+arabic-reshaper>=3
+python-bidi>=0.6
