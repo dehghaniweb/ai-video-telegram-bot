@@ -1,10 +1,12 @@
 import os
-import io
 import asyncio
-import subprocess
 from pathlib import Path
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,40 +16,24 @@ from telegram.ext import (
     filters,
 )
 
-from PIL import Image, ImageDraw, ImageFont
-from huggingface_hub import InferenceClient
-
-
 # =========================================================
 # SETTINGS
 # =========================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-HF_TOKEN = os.environ.get("HF_TOKEN")
-
-IMAGE_MODEL = "black-forest-labs/FLUX.1-schnell"
-
-VIDEO_WIDTH = 720
-VIDEO_HEIGHT = 1280
-SCENE_SECONDS = 5
-SCENE_COUNT = 6
 
 BASE_DIR = Path("video_work")
 BASE_DIR.mkdir(exist_ok=True)
 
-
-# =========================================================
-# USER DATA
-# =========================================================
-
+# ذخیره پروژه‌های کاربران
 user_projects = {}
 
-# پیام‌هایی که ربات می‌تواند برای پاک‌سازی دنبال کند
+# ذخیره پیام‌هایی که ربات در طول اجرای خودش می‌بیند
 user_messages = {}
 
 
 # =========================================================
-# MESSAGE TRACKING
+# MESSAGE MEMORY
 # =========================================================
 
 def remember_message(user_id, message_id):
@@ -61,8 +47,12 @@ def remember_message(user_id, message_id):
 
 
 async def send_message(update, text, **kwargs):
+    """
+    ارسال پیام و ذخیره ID آن برای پاک کردن بعدی
+    """
 
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     message = await update.effective_chat.send_message(
         text=text,
@@ -75,6 +65,9 @@ async def send_message(update, text, **kwargs):
 
 
 async def delete_old_messages(bot, chat_id, user_id):
+    """
+    پاک کردن پیام‌هایی که ربات از زمان اجرای فعلی به خاطر دارد.
+    """
 
     messages = user_messages.get(user_id, [])
 
@@ -85,6 +78,7 @@ async def delete_old_messages(bot, chat_id, user_id):
                 chat_id=chat_id,
                 message_id=message_id
             )
+
         except Exception:
             pass
 
@@ -92,12 +86,12 @@ async def delete_old_messages(bot, chat_id, user_id):
 
 
 # =========================================================
-# BUTTONS
+# KEYBOARD
 # =========================================================
 
 def main_keyboard():
 
-    return InlineKeyboardMarkup([
+    keyboard = [
         [
             InlineKeyboardButton(
                 "🚀 شروع ساخت ویدیو",
@@ -110,176 +104,375 @@ def main_keyboard():
                 callback_data="clear_project"
             )
         ]
-    ])
-
-
-# =========================================================
-# FONT
-# =========================================================
-
-def get_font(size=42):
-
-    fonts = [
-        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     ]
 
-    for font in fonts:
-
-        if os.path.exists(font):
-            return ImageFont.truetype(font, size)
-
-    return ImageFont.load_default()
+    return InlineKeyboardMarkup(keyboard)
 
 
-# =========================================================
-# PROJECT TYPE
-# =========================================================
+def after_idea_keyboard():
 
-def detect_project_type(text):
-
-    t = text.lower()
-
-    advertising_words = [
-        "تبلیغ",
-        "تبلیغات",
-        "فروش",
-        "فروشگاه",
-        "خرید",
-        "برند",
-        "advertising",
-        "advertisement",
-        "sell",
-        "sale",
-        "brand",
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🎬 ساخت ویدیو",
+                callback_data="make_video"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔄 ایده جدید",
+                callback_data="start_video"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🗑 شروع مجدد",
+                callback_data="clear_project"
+            )
+        ]
     ]
 
-    education_words = [
-        "آموزش",
-        "یادگیری",
-        "درس",
-        "آموزشی",
-        "teach",
-        "education",
-        "lesson",
-        "learn",
-        "tutorial",
-    ]
-
-    product_words = [
-        "محصول",
-        "کالا",
-        "دستگاه",
-        "اپلیکیشن",
-        "برنامه",
-        "سرویس",
-        "product",
-        "device",
-        "app",
-        "software",
-        "service",
-    ]
-
-    if any(x in t for x in education_words):
-        return "education"
-
-    if any(x in t for x in product_words):
-        return "product"
-
-    if any(x in t for x in advertising_words):
-        return "advertising"
-
-    return "general"
+    return InlineKeyboardMarkup(keyboard)
 
 
 # =========================================================
-# STORYBOARD
+# START
 # =========================================================
 
-def create_storyboard(text):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    project_type = detect_project_type(text)
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
-    if project_type == "advertising":
+    # پاک کردن پروژه قبلی
+    user_projects.pop(user_id, None)
 
-        scenes = [
+    # پاک کردن پیام‌های قبلی که ربات می‌شناسد
+    await delete_old_messages(
+        context.bot,
+        chat_id,
+        user_id
+    )
+
+    text = (
+        "🎬 سلام!\n\n"
+        "به ربات ساخت ویدیو خوش آمدی.\n\n"
+        "برای شروع روی دکمه زیر بزن:"
+    )
+
+    message = await update.effective_chat.send_message(
+        text=text,
+        reply_markup=main_keyboard()
+    )
+
+    remember_message(
+        user_id,
+        message.message_id
+    )
+
+
+# =========================================================
+# BUTTON HANDLER
+# =========================================================
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    user_id = query.from_user.id
+
+    # -----------------------------------------------------
+    # START VIDEO
+    # -----------------------------------------------------
+
+    if query.data == "start_video":
+
+        user_projects[user_id] = {
+            "idea": None,
+            "storyboard": None,
+            "status": "waiting_for_idea"
+        }
+
+        await query.edit_message_text(
+            text=(
+                "🎬 ساخت ویدیو\n\n"
+                "لطفاً ایده یا موضوع ویدیوت را بنویس.\n\n"
+                "مثلاً:\n"
+                "«یک ویدیوی جذاب درباره کشاورزی مدرن و "
+                "استفاده از هوش مصنوعی در کشاورزی»"
+            )
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # CLEAR PROJECT
+    # -----------------------------------------------------
+
+    if query.data == "clear_project":
+
+        user_projects.pop(user_id, None)
+
+        await delete_old_messages(
+            context.bot,
+            query.message.chat_id,
+            user_id
+        )
+
+        message = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=(
+                "🗑 پروژه قبلی پاک شد.\n\n"
+                "برای شروع دوباره روی دکمه زیر بزن:"
+            ),
+            reply_markup=main_keyboard()
+        )
+
+        remember_message(
+            user_id,
+            message.message_id
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # MAKE VIDEO
+    # -----------------------------------------------------
+
+    if query.data == "make_video":
+
+        project = user_projects.get(user_id)
+
+        if not project or not project.get("idea"):
+
+            await query.edit_message_text(
+                text=(
+                    "⚠️ هنوز ایده‌ای دریافت نکرده‌ام.\n\n"
+                    "لطفاً ابتدا ایده ویدیوت را ارسال کن."
+                ),
+                reply_markup=main_keyboard()
+            )
+
+            return
+
+        await query.edit_message_text(
+            text=(
+                "⏳ درخواست ساخت ویدیو دریافت شد.\n\n"
+                "⚠️ موتور ساخت تصویر هنوز فعال نشده است.\n\n"
+                "فعلاً ارتباط ربات را تست می‌کنیم تا مطمئن شویم "
+                "ربات بدون خطا کار می‌کند."
+            )
+        )
+
+        return
+
+
+# =========================================================
+# IDEA HANDLER
+# =========================================================
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user_id = update.effective_user.id
+
+    # ذخیره پیام کاربر
+    remember_message(
+        user_id,
+        update.message.message_id
+    )
+
+    text = update.message.text.strip()
+
+    if not text:
+        return
+
+    # اگر پروژه‌ای وجود ندارد
+    if user_id not in user_projects:
+
+        await send_message(
+            update,
+            "لطفاً ابتدا /start را بزن."
+        )
+
+        return
+
+    project = user_projects[user_id]
+
+    # -----------------------------------------------------
+    # انتظار برای ایده
+    # -----------------------------------------------------
+
+    if project.get("status") == "waiting_for_idea":
+
+        project["idea"] = text
+        project["status"] = "idea_received"
+
+        # فعلاً یک استوری‌بورد ساده ایجاد می‌کنیم
+        storyboard = [
             {
-                "title": "شروع",
-                "caption": "یک مشکل واقعی را نشان می‌دهیم",
-                "visual": "cinematic commercial opening, realistic modern environment, a person facing a common problem, natural lighting, professional advertising photography",
+                "scene": 1,
+                "description": f"شروع ویدیو درباره: {text}"
             },
             {
-                "title": "مشکل",
-                "caption": "مشکل را واضح‌تر می‌کنیم",
-                "visual": "realistic close-up of a person struggling with the problem, emotional but natural facial expression, cinematic commercial photography",
+                "scene": 2,
+                "description": f"نمایش موضوع اصلی: {text}"
             },
             {
-                "title": "راه‌حل",
-                "caption": "راه‌حل وارد داستان می‌شود",
-                "visual": "professional product or service presentation, realistic environment, attractive composition, premium commercial photography",
+                "scene": 3,
+                "description": f"توضیح مهم درباره: {text}"
             },
             {
-                "title": "استفاده",
-                "caption": "نحوه استفاده را نشان می‌دهیم",
-                "visual": "real person naturally using the product or service, realistic hands and environment, cinematic advertising scene",
+                "scene": 4,
+                "description": f"یک مثال واقعی درباره: {text}"
             },
             {
-                "title": "نتیجه",
-                "caption": "نتیجه مثبت را نشان می‌دهیم",
-                "visual": "happy satisfied customer after using the solution, natural smile, realistic lifestyle scene, cinematic commercial photography",
+                "scene": 5,
+                "description": f"جمع‌بندی موضوع: {text}"
             },
             {
-                "title": "پایان",
-                "caption": "نمای نهایی تبلیغ",
-                "visual": "beautiful premium hero shot, product or service as the main focus, clean professional background, cinematic advertising photography",
-            },
+                "scene": 6,
+                "description": f"پایان ویدیو درباره: {text}"
+            }
         ]
 
-    elif project_type == "product":
+        project["storyboard"] = storyboard
 
-        scenes = [
-            {
-                "title": "معرفی",
-                "caption": "محصول را معرفی می‌کنیم",
-                "visual": "premium product hero shot, realistic studio photography, cinematic lighting, highly detailed",
-            },
-            {
-                "title": "نیاز",
-                "caption": "نیازی که محصول حل می‌کند",
-                "visual": "realistic person experiencing a common everyday problem, natural environment, cinematic photography",
-            },
-            {
-                "title": "استفاده",
-                "caption": "محصول در حال استفاده",
-                "visual": "real person using a modern product naturally, realistic environment, professional commercial photography",
-            },
-            {
-                "title": "جزئیات",
-                "caption": "نمای نزدیک از محصول",
-                "visual": "detailed close-up product photography, realistic materials, premium commercial lighting",
-            },
-            {
-                "title": "نتیجه",
-                "caption": "رضایت مشتری",
-                "visual": "happy customer enjoying the benefits of a product, realistic lifestyle, natural expression, cinematic photography",
-            },
-            {
-                "title": "نمای نهایی",
-                "caption": "محصول در بهترین حالت",
-                "visual": "premium final hero shot of the product, clean elegant background, cinematic commercial photography",
-            },
-        ]
+        response = (
+            "✅ ایده دریافت شد!\n\n"
+            f"💡 ایده:\n{text}\n\n"
+            "📋 سناریوی اولیه آماده شد:\n\n"
+            "🎬 صحنه 1 — شروع موضوع\n"
+            "🎬 صحنه 2 — معرفی موضوع\n"
+            "🎬 صحنه 3 — توضیح اصلی\n"
+            "🎬 صحنه 4 — مثال\n"
+            "🎬 صحنه 5 — جمع‌بندی\n"
+            "🎬 صحنه 6 — پایان\n\n"
+            "حالا می‌توانیم وارد مرحله ساخت ویدیو شویم."
+        )
 
-    elif project_type == "education":
+        await send_message(
+            update,
+            response,
+            reply_markup=after_idea_keyboard()
+        )
 
-        scenes = [
-            {
-                "title": "شروع آموزش",
-                "caption": "موضوع را معرفی می‌کنیم",
-                "visual": "friendly professional teacher explaining a topic, modern classroom or studio, realistic educational photography",
-            },
-            {
-                "title": "مفهوم اصلی",
-                "caption": "مفهوم اصلی را توضیح می‌دهیم",
-                "visual": "teacher explaining an important concept using a simple visual demonstration, realistic
+        return
+
+    # -----------------------------------------------------
+    # اگر ایده قبلاً دریافت شده
+    # -----------------------------------------------------
+
+    if project.get("status") == "idea_received":
+
+        project["idea"] = text
+
+        await send_message(
+            update,
+            (
+                "✅ ایده جدید جایگزین شد.\n\n"
+                f"💡 {text}\n\n"
+                "برای ادامه روی «🎬 ساخت ویدیو» بزن."
+            ),
+            reply_markup=after_idea_keyboard()
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # وضعیت نامشخص
+    # -----------------------------------------------------
+
+    await send_message(
+        update,
+        (
+            "پیامت دریافت شد ✅\n\n"
+            "برای شروع یک پروژه جدید، /start را بزن."
+        ),
+        reply_markup=main_keyboard()
+    )
+
+
+# =========================================================
+# ERROR HANDLER
+# =========================================================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+
+    print("====================================")
+    print("BOT ERROR")
+    print("====================================")
+
+    try:
+        print(context.error)
+    except Exception:
+        pass
+
+    print("====================================")
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+def main():
+
+    if not BOT_TOKEN:
+
+        print("ERROR: BOT_TOKEN is not set.")
+        return
+
+    print("====================================")
+    print("AI VIDEO TELEGRAM BOT")
+    print("Starting...")
+    print("====================================")
+
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    # Commands
+    application.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
+    )
+
+    # Buttons
+    application.add_handler(
+        CallbackQueryHandler(
+            button_handler
+        )
+    )
+
+    # Text
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_text
+        )
+    )
+
+    # Errors
+    application.add_error_handler(
+        error_handler
+    )
+
+    print("Bot is running...")
+    print("Waiting for Telegram messages...")
+
+    application.run_polling(
+        drop_pending_updates=True
+    )
+
+
+# =========================================================
+# RUN
+# =========================================================
+
+if __name__ == "__main__":
+    main()
