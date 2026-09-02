@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Get project
         uses: actions/checkout@v4
 
@@ -16,7 +17,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install FFmpeg and Persian fonts
+      - name: Install FFmpeg and fonts
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core
@@ -29,6 +30,5 @@ jobs:
       - name: Start Telegram Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python bot.py
