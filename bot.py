@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import tempfile
 import subprocess
@@ -16,31 +17,31 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
+# =========================================================
 # تنظیمات
-# =========================
+# =========================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 WIDTH = 720
 HEIGHT = 1280
 FPS = 15
-SCENE_DURATION = 5
-SCENE_COUNT = 6
 
-# ذخیره موقت اطلاعات هر کاربر
+SCENE_COUNT = 6
+SCENE_DURATION = 5
+
 drafts = {}
 
 
-# =========================
-# فونت فارسی
-# =========================
+# =========================================================
+# فونت
+# =========================================================
 
 def get_font(size):
     fonts = [
-        r"C:\Windows\Fonts\tahoma.ttf",
-        r"C:\Windows\Fonts\arial.ttf",
-        r"C:\Windows\Fonts\segoeui.ttf",
+        r"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        r"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        r"/usr/share/fonts/truetype/freefont/FreeSans.ttf",
     ]
 
     for font in fonts:
@@ -50,90 +51,373 @@ def get_font(size):
     return ImageFont.load_default()
 
 
-# =========================
-# متن فارسی
-# =========================
+# =========================================================
+# فارسی
+# =========================================================
 
-def rtl_text(text):
+def rtl(text):
     try:
         import arabic_reshaper
         from bidi.algorithm import get_display
 
-        reshaped = arabic_reshaper.reshape(text)
-        return get_display(reshaped)
+        return get_display(
+            arabic_reshaper.reshape(text)
+        )
 
     except Exception:
         return text
 
 
-# =========================
-# شکستن متن
-# =========================
+# =========================================================
+# تشخیص نوع پروژه
+# =========================================================
 
-def split_text(text, count=6):
-    text = text.strip()
+def detect_type(text):
 
-    if not text:
-        return [""] * count
+    t = text.lower()
 
-    # ابتدا بر اساس جمله‌ها
-    parts = []
-
-    for separator in ["؟", "!", "！", ".", "،", "\n"]:
-        if separator in text:
-            temp = []
-
-            for p in text.split(separator):
-                p = p.strip()
-                if p:
-                    temp.append(p)
-
-            if len(temp) >= 2:
-                parts = temp
-                break
-
-    if not parts:
-        words = text.split()
-        chunk = max(1, len(words) // count)
-
-        for i in range(0, len(words), chunk):
-            parts.append(" ".join(words[i:i + chunk]))
-
-    # دقیقاً count بخش
-    if len(parts) > count:
-        parts = parts[:count]
-
-    while len(parts) < count:
-        parts.append("")
-
-    return parts
-
-
-# =========================
-# ساخت تصویر صحنه
-# =========================
-
-def create_scene(text, index, output, photo=None):
-
-    img = Image.new("RGB", (WIDTH, HEIGHT), (20, 20, 25))
-    draw = ImageDraw.Draw(img)
-
-    # رنگ‌های مختلف برای صحنه‌ها
-    backgrounds = [
-        (18, 25, 40),
-        (25, 35, 55),
-        (20, 45, 40),
-        (45, 35, 25),
-        (35, 25, 50),
-        (15, 35, 45),
+    advertising_words = [
+        "تبلیغ",
+        "فروش",
+        "خرید",
+        "محصول",
+        "قیمت",
+        "مشتری",
+        "برند",
+        "تبلیغاتی",
+        "اینستاگرام",
+        "فروشگاه",
     ]
+
+    education_words = [
+        "آموزش",
+        "آموزشی",
+        "یاد بگیریم",
+        "یادگیری",
+        "چگونه",
+        "چطور",
+        "درس",
+        "نکته",
+        "آموزش دهید",
+    ]
+
+    product_words = [
+        "محصول",
+        "کالا",
+        "معرفی",
+        "معرفی محصول",
+    ]
+
+    if any(x in t for x in education_words):
+        return "education"
+
+    if any(x in t for x in advertising_words):
+        return "advertising"
+
+    if any(x in t for x in product_words):
+        return "product"
+
+    return "general"
+
+
+# =========================================================
+# استخراج موضوع اصلی
+# =========================================================
+
+def clean_subject(text):
+
+    text = re.sub(
+        r"(یک|یه|برای|بساز|ساخت|ایجاد|کن|مناسب|جذاب|حرفه‌ای|حرفه ای)",
+        " ",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    if len(text) > 120:
+        text = text[:120] + "..."
+
+    return text
+
+
+# =========================================================
+# ساخت سناریو
+# =========================================================
+
+def create_story(text):
+
+    project_type = detect_type(text)
+    subject = clean_subject(text)
+
+    if project_type == "education":
+
+        scenes = [
+            (
+                "شروع",
+                "امروز یک نکته مهم را یاد می‌گیریم",
+                subject
+            ),
+            (
+                "مسئله",
+                "چرا این موضوع اهمیت دارد؟",
+                subject
+            ),
+            (
+                "آموزش",
+                "قدم اول را با دقت انجام دهید",
+                subject
+            ),
+            (
+                "نکته مهم",
+                "این نکته می‌تواند نتیجه را بهتر کند",
+                subject
+            ),
+            (
+                "جمع‌بندی",
+                "حالا می‌دانید چگونه بهتر عمل کنید",
+                subject
+            ),
+            (
+                "پایان",
+                "این آموزش را ذخیره و با دیگران به اشتراک بگذارید",
+                subject
+            ),
+        ]
+
+    elif project_type == "product":
+
+        scenes = [
+            (
+                "معرفی",
+                "با این محصول بیشتر آشنا شوید",
+                subject
+            ),
+            (
+                "نیاز",
+                "اگر به دنبال یک انتخاب بهتر هستید...",
+                subject
+            ),
+            (
+                "محصول",
+                "راه‌حلی ساده و کاربردی",
+                subject
+            ),
+            (
+                "مزیت",
+                "طراحی شده برای استفاده آسان و نتیجه بهتر",
+                subject
+            ),
+            (
+                "نتیجه",
+                "انتخاب مناسب می‌تواند تفاوت ایجاد کند",
+                subject
+            ),
+            (
+                "اقدام",
+                "برای اطلاعات بیشتر با ما تماس بگیرید",
+                subject
+            ),
+        ]
+
+    elif project_type == "advertising":
+
+        scenes = [
+            (
+                "جذب مخاطب",
+                "دنبال یک انتخاب بهتر هستید؟",
+                subject
+            ),
+            (
+                "مشکل",
+                "وقت آن رسیده راه‌حل بهتری پیدا کنید",
+                subject
+            ),
+            (
+                "راه‌حل",
+                "یک انتخاب حرفه‌ای برای شما",
+                subject
+            ),
+            (
+                "مزیت",
+                "کیفیت، کاربرد و تجربه بهتر",
+                subject
+            ),
+            (
+                "پیشنهاد",
+                "این فرصت را از دست ندهید",
+                subject
+            ),
+            (
+                "اقدام",
+                "همین امروز اطلاعات بیشتری دریافت کنید",
+                subject
+            ),
+        ]
+
+    else:
+
+        scenes = [
+            (
+                "شروع",
+                "یک ایده جالب برای شما",
+                subject
+            ),
+            (
+                "موضوع",
+                "بیایید موضوع را بهتر بشناسیم",
+                subject
+            ),
+            (
+                "نکته اول",
+                "این بخش اهمیت زیادی دارد",
+                subject
+            ),
+            (
+                "نکته دوم",
+                "با یک روش ساده می‌توان بهتر عمل کرد",
+                subject
+            ),
+            (
+                "نتیجه",
+                "حالا تصویر کامل‌تری دارید",
+                subject
+            ),
+            (
+                "پایان",
+                "برای مطالب بیشتر همراه ما باشید",
+                subject
+            ),
+        ]
+
+    return project_type, scenes
+
+
+# =========================================================
+# نمایش سناریو
+# =========================================================
+
+def story_to_text(project_type, scenes):
+
+    names = {
+        "advertising": "📢 تبلیغاتی",
+        "education": "🎓 آموزشی",
+        "product": "🛍 معرفی محصول",
+        "general": "🎬 عمومی",
+    }
+
+    result = [
+        "🎬 سناریوی پیشنهادی",
+        "",
+        f"نوع محتوا: {names.get(project_type, '🎬 عمومی')}",
+        "",
+    ]
+
+    for i, (title, main, subject) in enumerate(scenes, 1):
+
+        result.append(
+            f"🎞 صحنه {i} — {title}"
+        )
+
+        result.append(
+            f"📝 {main}"
+        )
+
+        result.append(
+            f"🎯 موضوع: {subject}"
+        )
+
+        result.append("")
+
+    result.append(
+        "اگر سناریو مورد تأیید است، /render را بزن."
+    )
+
+    return "\n".join(result)
+
+
+# =========================================================
+# شکستن متن برای نمایش
+# =========================================================
+
+def wrap_text(draw, text, font, max_width):
+
+    words = text.split()
+
+    lines = []
+    current = ""
+
+    for word in words:
+
+        test = (
+            word
+            if not current
+            else current + " " + word
+        )
+
+        bbox = draw.textbbox(
+            (0, 0),
+            rtl(test),
+            font=font
+        )
+
+        if bbox[2] - bbox[0] <= max_width:
+            current = test
+        else:
+
+            if current:
+                lines.append(current)
+
+            current = word
+
+    if current:
+        lines.append(current)
+
+    return lines
+
+
+# =========================================================
+# ساخت تصویر صحنه
+# =========================================================
+
+def create_scene(
+    title,
+    main_text,
+    subject,
+    index,
+    output,
+    photo=None
+):
+
+    backgrounds = [
+        (18, 30, 48),
+        (24, 40, 58),
+        (20, 48, 42),
+        (48, 36, 25),
+        (38, 28, 52),
+        (18, 42, 52),
+    ]
+
+    img = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        backgrounds[index]
+    )
+
+    # -----------------------------------------------------
+    # اگر عکس محصول وجود دارد
+    # -----------------------------------------------------
 
     if photo and os.path.exists(photo):
 
         try:
+
             source = Image.open(photo).convert("RGB")
 
-            # نسبت تصویر
             scale = max(
                 WIDTH / source.width,
                 HEIGHT / source.height
@@ -149,20 +433,29 @@ def create_scene(text, index, output, photo=None):
                 Image.Resampling.LANCZOS
             )
 
-            left = (source.width - WIDTH) // 2
-            top = (source.height - HEIGHT) // 2
+            left = (
+                source.width - WIDTH
+            ) // 2
+
+            top = (
+                source.height - HEIGHT
+            ) // 2
 
             source = source.crop(
-                (left, top, left + WIDTH, top + HEIGHT)
+                (
+                    left,
+                    top,
+                    left + WIDTH,
+                    top + HEIGHT
+                )
             )
 
             img.paste(source)
 
-            # لایه تاریک برای خوانایی متن
             overlay = Image.new(
                 "RGBA",
                 (WIDTH, HEIGHT),
-                (0, 0, 0, 90)
+                (0, 0, 0, 110)
             )
 
             img = Image.alpha_composite(
@@ -170,125 +463,132 @@ def create_scene(text, index, output, photo=None):
                 overlay
             ).convert("RGB")
 
-            draw = ImageDraw.Draw(img)
-
         except Exception:
-            img = Image.new(
-                "RGB",
-                (WIDTH, HEIGHT),
-                backgrounds[index]
-            )
-            draw = ImageDraw.Draw(img)
+            pass
 
-    else:
-        # پس‌زمینه ساده زیبا
-        img = Image.new(
-            "RGB",
-            (WIDTH, HEIGHT),
-            backgrounds[index]
-        )
+    draw = ImageDraw.Draw(img)
 
-        draw = ImageDraw.Draw(img)
+    # -----------------------------------------------------
+    # تزئین
+    # -----------------------------------------------------
 
-        # اشکال تزئینی
-        draw.ellipse(
-            (-180, -180, 350, 350),
-            fill=(40, 70, 100)
-        )
-
-        draw.ellipse(
-            (WIDTH - 350, HEIGHT - 350,
-             WIDTH + 150, HEIGHT + 150),
-            fill=(70, 50, 80)
-        )
-
-    # شماره صحنه
-    small_font = get_font(34)
-
-    scene_label = rtl_text(
-        f"صحنه {index + 1}"
+    draw.ellipse(
+        (-180, -150, 300, 330),
+        fill=(50, 80, 105)
     )
 
+    draw.ellipse(
+        (
+            WIDTH - 300,
+            HEIGHT - 300,
+            WIDTH + 180,
+            HEIGHT + 180
+        ),
+        fill=(75, 55, 90)
+    )
+
+    # -----------------------------------------------------
+    # عنوان
+    # -----------------------------------------------------
+
+    title_font = get_font(38)
+
     draw.text(
-        (WIDTH // 2, 170),
-        scene_label,
-        font=small_font,
+        (WIDTH // 2, 160),
+        rtl(title),
+        font=title_font,
         anchor="mm",
         fill="white"
     )
 
+    # -----------------------------------------------------
     # متن اصلی
-    font = get_font(55)
+    # -----------------------------------------------------
 
-    # شکست خطوط
-    words = text.split()
-    lines = []
-    current = ""
+    main_font = get_font(56)
 
-    for word in words:
+    lines = wrap_text(
+        draw,
+        main_text,
+        main_font,
+        WIDTH - 100
+    )
 
-        test = current + " " + word
-
-        bbox = draw.textbbox(
-            (0, 0),
-            rtl_text(test),
-            font=font
-        )
-
-        if bbox[2] - bbox[0] < WIDTH - 100:
-            current = test.strip()
-
-        else:
-            if current:
-                lines.append(current)
-
-            current = word
-
-    if current:
-        lines.append(current)
-
-    # حداکثر 5 خط
     lines = lines[:5]
 
-    y = HEIGHT // 2 - (len(lines) * 40)
+    total_height = len(lines) * 90
+
+    y = (
+        HEIGHT // 2
+        - total_height // 2
+    )
 
     for line in lines:
 
-        shaped = rtl_text(line)
-
         draw.text(
             (WIDTH // 2, y),
-            shaped,
-            font=font,
+            rtl(line),
+            font=main_font,
             anchor="mm",
             fill="white",
             stroke_width=2,
             stroke_fill=(0, 0, 0)
         )
 
-        y += 85
+        y += 90
 
-    # پایین تصویر
-    footer_font = get_font(30)
+    # -----------------------------------------------------
+    # موضوع
+    # -----------------------------------------------------
 
-    footer = rtl_text(
-        "ساخته شده با ربات ویدئوساز"
+    subject_font = get_font(28)
+
+    subject_lines = wrap_text(
+        draw,
+        subject,
+        subject_font,
+        WIDTH - 120
     )
+
+    subject_lines = subject_lines[:2]
+
+    y = HEIGHT - 220
+
+    for line in subject_lines:
+
+        draw.text(
+            (WIDTH // 2, y),
+            rtl(line),
+            font=subject_font,
+            anchor="mm",
+            fill=(235, 235, 235)
+        )
+
+        y += 42
+
+    # -----------------------------------------------------
+    # شماره صحنه
+    # -----------------------------------------------------
+
+    scene_font = get_font(25)
 
     draw.text(
-        (WIDTH // 2, HEIGHT - 100),
-        footer,
-        font=footer_font,
+        (WIDTH // 2, HEIGHT - 70),
+        rtl(f"صحنه {index + 1} از 6"),
+        font=scene_font,
         anchor="mm",
-        fill=(220, 220, 220)
+        fill=(210, 210, 210)
     )
 
-    img.save(output, quality=95)
+    img.save(
+        output,
+        quality=95
+    )
 
 
-# =========================
-# اجرای FFmpeg
-# =========================
+# =========================================================
+# FFmpeg
+# =========================================================
 
 def run_ffmpeg(command):
 
@@ -300,32 +600,45 @@ def run_ffmpeg(command):
     )
 
     if result.returncode != 0:
-        raise RuntimeError(result.stderr[-3000:])
+        raise RuntimeError(
+            result.stderr[-4000:]
+        )
 
 
-# =========================
+# =========================================================
 # ساخت ویدئو
-# =========================
+# =========================================================
 
-def create_video(text, photo=None, audio=None):
+def create_video(
+    scenes,
+    photo=None,
+    audio=None
+):
 
     workdir = Path(
-        tempfile.mkdtemp(prefix="telegram_video_")
+        tempfile.mkdtemp(
+            prefix="ai_video_"
+        )
     )
 
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
 
-    scenes = split_text(text, SCENE_COUNT)
+    parts = []
 
-    video_parts = []
+    for i, (title, main_text, subject) in enumerate(scenes):
 
-    for i, scene_text in enumerate(scenes):
+        image_path = (
+            workdir / f"scene_{i}.jpg"
+        )
 
-        image_path = workdir / f"scene_{i}.jpg"
-        video_path = workdir / f"part_{i}.mp4"
+        video_path = (
+            workdir / f"scene_{i}.mp4"
+        )
 
         create_scene(
-            scene_text,
+            title,
+            main_text,
+            subject,
             i,
             str(image_path),
             photo
@@ -334,14 +647,18 @@ def create_video(text, photo=None, audio=None):
         command = [
             ffmpeg,
             "-y",
+
             "-loop",
             "1",
+
             "-i",
             str(image_path),
+
             "-t",
             str(SCENE_DURATION),
 
             "-vf",
+
             (
                 "zoompan="
                 "z='min(zoom+0.0015,1.12)':"
@@ -353,10 +670,13 @@ def create_video(text, photo=None, audio=None):
             ),
 
             "-an",
+
             "-c:v",
             "libx264",
+
             "-pix_fmt",
             "yuv420p",
+
             "-movflags",
             "+faststart",
 
@@ -365,19 +685,31 @@ def create_video(text, photo=None, audio=None):
 
         run_ffmpeg(command)
 
-        video_parts.append(video_path)
+        parts.append(video_path)
 
-    # فایل لیست
-    list_file = workdir / "list.txt"
+    # -----------------------------------------------------
+    # اتصال صحنه‌ها
+    # -----------------------------------------------------
 
-    with open(list_file, "w", encoding="utf-8") as f:
+    list_file = (
+        workdir / "list.txt"
+    )
 
-        for part in video_parts:
+    with open(
+        list_file,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        for part in parts:
+
             f.write(
                 f"file '{part.as_posix()}'\n"
             )
 
-    joined = workdir / "joined.mp4"
+    joined = (
+        workdir / "joined.mp4"
+    )
 
     run_ffmpeg([
         ffmpeg,
@@ -393,94 +725,133 @@ def create_video(text, photo=None, audio=None):
         str(joined)
     ])
 
-    final = workdir / "final.mp4"
+    # -----------------------------------------------------
+    # افزودن صدا
+    # -----------------------------------------------------
 
     if audio and os.path.exists(audio):
+
+        final = (
+            workdir / "final.mp4"
+        )
 
         run_ffmpeg([
             ffmpeg,
             "-y",
+
             "-i",
             str(joined),
+
             "-i",
             str(audio),
+
             "-filter_complex",
             "[1:a]apad,atrim=0:30[a]",
+
             "-map",
             "0:v",
+
             "-map",
             "[a]",
+
             "-c:v",
             "copy",
+
             "-c:a",
             "aac",
+
             "-shortest",
+
             str(final)
         ])
 
-    else:
-        final = joined
+        return str(final)
 
-    return str(final)
+    return str(joined)
 
 
-# =========================
-# Telegram
-# =========================
+# =========================================================
+# /start
+# =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-    text = """
-🎬 ربات ویدئوساز آماده است!
+    message = """
+🎬 ربات ساخت ویدئو آماده است!
 
-برای ساخت ویدئو:
+من می‌توانم برایت ویدئوهای:
 
-1️⃣ متن تبلیغ یا آموزش را بفرست
-2️⃣ اگر عکس محصول داری، عکس را هم بفرست
-3️⃣ اگر گویندگی داری، فایل MP3 یا Voice را بفرست
-4️⃣ در پایان /render را بزن
+📢 تبلیغاتی
+🛍 معرفی محصول
+🎓 آموزشی
+📱 اینستاگرامی
 
-مثال:
+بسازم.
 
-«یک تبلیغ جذاب برای کود طبیعی کشاورزی
-که باعث رشد بهتر گیاه می‌شود.»
+روش کار:
+
+1️⃣ متن یا ایده را بفرست
+2️⃣ اگر عکس محصول داری، عکس را بفرست
+3️⃣ اگر گویندگی داری، MP3 یا Voice بفرست
+4️⃣ من سناریو را می‌سازم
+5️⃣ اگر تأیید کردی /render را بزن
 
 دستورها:
 
-/render  ساخت ویدئو
-/clear   پاک کردن پروژه فعلی
+/render
+ساخت ویدئو
+
+/clear
+پاک کردن پروژه فعلی
 """
 
-    await update.message.reply_text(text)
-
-
-async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    drafts.pop(update.effective_chat.id, None)
-
     await update.message.reply_text(
-        "🗑️ پروژه فعلی پاک شد."
+        message
     )
 
 
-async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# دریافت متن
+# =========================================================
+
+async def receive_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     chat_id = update.effective_chat.id
 
-    if chat_id not in drafts:
-        drafts[chat_id] = {}
+    text = update.message.text.strip()
 
-    drafts[chat_id]["text"] = update.message.text
+    project_type, scenes = create_story(text)
+
+    drafts[chat_id] = {
+        "text": text,
+        "type": project_type,
+        "scenes": scenes,
+    }
+
+    story = story_to_text(
+        project_type,
+        scenes
+    )
 
     await update.message.reply_text(
-        "✅ متن دریافت شد.\n\n"
-        "اگر عکس محصول داری بفرست.\n"
-        "اگر گویندگی داری MP3 یا Voice بفرست.\n"
-        "بعد /render را بزن."
+        story
     )
 
 
-async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# دریافت عکس
+# =========================================================
+
+async def receive_photo(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     chat_id = update.effective_chat.id
 
@@ -494,25 +865,59 @@ async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     workdir = Path(
-        tempfile.mkdtemp(prefix="photo_")
+        tempfile.mkdtemp(
+            prefix="product_photo_"
+        )
     )
 
-    path = workdir / "product.jpg"
+    path = (
+        workdir / "product.jpg"
+    )
 
-    await file.download_to_drive(str(path))
+    await file.download_to_drive(
+        str(path)
+    )
 
     drafts[chat_id]["photo"] = str(path)
 
     if update.message.caption:
-        drafts[chat_id]["text"] = update.message.caption
 
-    await update.message.reply_text(
-        "🖼️ عکس دریافت شد.\n"
-        "حالا متن را بفرست یا /render را بزن."
-    )
+        text = update.message.caption.strip()
+
+        project_type, scenes = create_story(
+            text
+        )
+
+        drafts[chat_id]["text"] = text
+        drafts[chat_id]["type"] = project_type
+        drafts[chat_id]["scenes"] = scenes
+
+        story = story_to_text(
+            project_type,
+            scenes
+        )
+
+        await update.message.reply_text(
+            "🖼️ عکس دریافت شد.\n\n"
+            + story
+        )
+
+    else:
+
+        await update.message.reply_text(
+            "🖼️ عکس محصول دریافت شد.\n"
+            "حالا متن را بفرست."
+        )
 
 
-async def receive_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# دریافت صدا
+# =========================================================
+
+async def receive_audio(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     chat_id = update.effective_chat.id
 
@@ -520,84 +925,138 @@ async def receive_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         drafts[chat_id] = {}
 
     if update.message.audio:
-        file_id = update.message.audio.file_id
+
+        file_id = (
+            update.message.audio.file_id
+        )
+
         extension = ".mp3"
 
     else:
-        file_id = update.message.voice.file_id
+
+        file_id = (
+            update.message.voice.file_id
+        )
+
         extension = ".ogg"
 
-    file = await context.bot.get_file(file_id)
-
-    workdir = Path(
-        tempfile.mkdtemp(prefix="audio_")
+    file = await context.bot.get_file(
+        file_id
     )
 
-    path = workdir / f"voice{extension}"
+    workdir = Path(
+        tempfile.mkdtemp(
+            prefix="voice_"
+        )
+    )
 
-    await file.download_to_drive(str(path))
+    path = (
+        workdir / f"voice{extension}"
+    )
+
+    await file.download_to_drive(
+        str(path)
+    )
 
     drafts[chat_id]["audio"] = str(path)
 
     await update.message.reply_text(
-        "🔊 فایل صوتی دریافت شد.\n"
-        "حالا /render را بزن."
+        "🔊 گویندگی دریافت شد.\n"
+        "اگر سناریو را تأیید کرده‌ای، /render را بزن."
     )
 
 
-async def render(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# /clear
+# =========================================================
+
+async def clear(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    drafts.pop(
+        update.effective_chat.id,
+        None
+    )
+
+    await update.message.reply_text(
+        "🗑 پروژه فعلی پاک شد."
+    )
+
+
+# =========================================================
+# /render
+# =========================================================
+
+async def render(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     chat_id = update.effective_chat.id
 
     draft = drafts.get(chat_id)
 
-    if not draft or not draft.get("text"):
+    if not draft or not draft.get("scenes"):
 
         await update.message.reply_text(
-            "❌ هنوز متنی برای ساخت ویدئو دریافت نکرده‌ام."
+            "❌ هنوز سناریویی نداریم.\n"
+            "اول متن یا ایده را بفرست."
         )
 
         return
 
     await update.message.reply_text(
-        "🎬 در حال ساخت ویدئو هستم...\n"
-        "ممکن است چند دقیقه طول بکشد."
+        "🎬 سناریو تأیید شد.\n\n"
+        "در حال ساخت ویدئو هستم...\n"
+        "⏳ لطفاً صبر کن."
     )
 
     try:
 
         video = await asyncio.to_thread(
             create_video,
-            draft["text"],
+            draft["scenes"],
             draft.get("photo"),
             draft.get("audio")
         )
 
-        with open(video, "rb") as f:
+        with open(
+            video,
+            "rb"
+        ) as f:
 
             await update.message.reply_video(
                 video=f,
-                caption="🎬 ویدئوی شما آماده شد.",
+                caption=(
+                    "🎬 ویدئو آماده شد!\n\n"
+                    "نسخه فعلی: موشن‌گرافیک"
+                ),
                 supports_streaming=True
             )
 
-        drafts.pop(chat_id, None)
+        drafts.pop(
+            chat_id,
+            None
+        )
 
     except Exception as e:
 
         await update.message.reply_text(
-            "❌ خطا در ساخت ویدئو:\n\n"
-            + str(e)[-2500:]
+            "❌ خطا هنگام ساخت ویدئو:\n\n"
+            + str(e)[-3000:]
         )
 
 
-# =========================
-# Main
-# =========================
+# =========================================================
+# اجرای ربات
+# =========================================================
 
 def main():
 
     if not BOT_TOKEN:
+
         raise RuntimeError(
             "BOT_TOKEN تنظیم نشده است."
         )
@@ -609,15 +1068,24 @@ def main():
     )
 
     app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     app.add_handler(
-        CommandHandler("clear", clear)
+        CommandHandler(
+            "clear",
+            clear
+        )
     )
 
     app.add_handler(
-        CommandHandler("render", render)
+        CommandHandler(
+            "render",
+            render
+        )
     )
 
     app.add_handler(
@@ -641,9 +1109,13 @@ def main():
         )
     )
 
-    print("Bot is running...")
+    print(
+        "AI Video Telegram Bot is running..."
+    )
 
-    app.run_polling()
+    app.run_polling(
+        drop_pending_updates=True
+    )
 
 
 if __name__ == "__main__":
