@@ -1,1128 +1,425 @@
 import os
-import io
+import re
 import time
+import json
 import shutil
 import subprocess
 import requests
 
-from PIL import Image
-
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update
-)
-
+from PIL import Image, ImageOps
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
 )
 
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-# =========================================================
-# SETTINGS
-# =========================================================
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+HORDE_API = "https://aihorde.net/api/v2"
+HORDE_KEY = "0000000000"
+CLIENT_AGENT = "AliDeghani-AI-Video-Bot/1.0"
 
 BASE_DIR = "video_data"
 
-os.makedirs(BASE_DIR, exist_ok=True)
-
 
 # =========================================================
-# MESSAGE MEMORY
+# پوشه کاربر
 # =========================================================
 
 def get_chat_dir(chat_id):
-    path = os.path.join(
-        BASE_DIR,
-        str(chat_id)
-    )
-
-    os.makedirs(
-        path,
-        exist_ok=True
-    )
-
+    path = os.path.join(BASE_DIR, str(chat_id))
+    os.makedirs(path, exist_ok=True)
     return path
 
 
-def get_message_file(chat_id):
-
-    return os.path.join(
-        get_chat_dir(chat_id),
-        "messages.txt"
-    )
-
-
-def load_message_ids(chat_id):
-
-    filename = get_message_file(chat_id)
-
-    if not os.path.exists(filename):
-        return []
-
-    ids = []
-
-    try:
-        with open(
-            filename,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            for line in f:
-
-                line = line.strip()
-
-                if line.isdigit():
-                    ids.append(int(line))
-
-    except Exception:
-        pass
-
-    return ids
-
-
-def save_message_id(chat_id, message_id):
-
-    filename = get_message_file(chat_id)
-
-    try:
-
-        with open(
-            filename,
-            "a",
-            encoding="utf-8"
-        ) as f:
-
-            f.write(
-                str(message_id) + "\n"
-            )
-
-    except Exception as e:
-
-        print(
-            "MESSAGE SAVE ERROR:",
-            repr(e)
-        )
-
-
-def clear_saved_message_ids(chat_id):
-
-    filename = get_message_file(chat_id)
-
-    try:
-
-        if os.path.exists(filename):
-            os.remove(filename)
-
-    except Exception:
-        pass
-
-
-async def remember_message(update, message):
-
-    if not message:
-        return
-
-    chat_id = update.effective_chat.id
-
-    save_message_id(
-        chat_id,
-        message.message_id
-    )
-
-
-async def send_message(update, text, **kwargs):
-
-    message = await update.effective_chat.send_message(
-        text,
-        **kwargs
-    )
-
-    await remember_message(
-        update,
-        message
-    )
-
-    return message
-
-
 # =========================================================
-# DELETE PREVIOUS BOT MESSAGES
+# تشخیص نوع محصول
 # =========================================================
 
-async def delete_saved_messages(
-    context,
-    chat_id
-):
+def detect_subject(text):
+    t = text.lower()
 
-    message_ids = load_message_ids(
-        chat_id
-    )
-
-    if not message_ids:
-        return
-
-    print(
-        f"Deleting {len(message_ids)} saved messages..."
-    )
-
-    for message_id in message_ids:
-
-        try:
-
-            await context.bot.delete_message(
-                chat_id=chat_id,
-                message_id=message_id
-            )
-
-        except Exception as e:
-
-            print(
-                "DELETE ERROR:",
-                message_id,
-                repr(e)
-            )
-
-    clear_saved_message_ids(
-        chat_id
-    )
-
-
-# =========================================================
-# START
-# =========================================================
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    context.user_data.clear()
-
-    keyboard = [
-
-        [
-            InlineKeyboardButton(
-                "🚀 شروع ساخت ویدیو",
-                callback_data="start_video"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "🗑 شروع مجدد",
-                callback_data="restart"
-            )
-        ]
-
+    agriculture = [
+        "کود", "گیاه", "کشاورزی", "گندم", "جو", "ذرت",
+        "مزرعه", "کشاورز", "fertilizer", "wheat",
+        "agriculture", "farm", "crop"
     ]
 
-    message = await update.message.reply_text(
-
-        "🎬 سازنده ویدیوی تبلیغاتی\n\n"
-
-        "ایده یا محصولت را بنویس.\n\n"
-
-        "مثلاً:\n"
-        "🪒 تبلیغ ماشین اصلاح صورت\n\n"
-
-        "یا:\n"
-        "🌾 تبلیغ کود گیاهی برای گندم\n\n"
-
-        "یا:\n"
-        "👟 تبلیغ کفش ورزشی",
-
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        )
-    )
-
-    await remember_message(
-        update,
-        message
-    )
-
-
-# =========================================================
-# RESTART
-# =========================================================
-
-async def restart(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    chat_id = update.effective_chat.id
-
-    # پاک کردن پیام‌های قبلی ثبت‌شده
-    await delete_saved_messages(
-        context,
-        chat_id
-    )
-
-    # پاک کردن اطلاعات قبلی
-    context.user_data.clear()
-
-    # ساخت پیام جدید
-    keyboard = [
-
-        [
-            InlineKeyboardButton(
-                "🚀 شروع ساخت ویدیو",
-                callback_data="start_video"
-            )
-        ]
-
+    grooming = [
+        "ماشین اصلاح", "ریش تراش", "اصلاح صورت",
+        "شیور", "موزر", "shaver", "trimmer", "grooming"
     ]
 
-    message = await context.bot.send_message(
-
-        chat_id=chat_id,
-
-        text=(
-            "🔄 شروع مجدد شد.\n\n"
-            "✍️ ایده تبلیغاتی خودت را بنویس.\n\n"
-            "مثلاً:\n"
-            "تبلیغ ماشین اصلاح صورت"
-        ),
-
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        )
-    )
-
-    await remember_message(
-        update,
-        message
-    )
-
-
-# =========================================================
-# START VIDEO
-# =========================================================
-
-async def start_video(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    context.user_data.clear()
-
-    context.user_data["step"] = "idea"
-
-    message = await query.message.reply_text(
-
-        "✍️ ایده تبلیغاتی را بنویس:\n\n"
-
-        "مثلاً:\n"
-        "تبلیغ ماشین اصلاح صورت\n\n"
-
-        "یا:\n"
-        "تبلیغ کود گیاهی برای گندم"
-    )
-
-    await remember_message(
-        update,
-        message
-    )
-
-
-# =========================================================
-# SUBJECT DETECTION
-# =========================================================
-
-def detect_subject(idea):
-
-    text = idea.lower()
-
-    agriculture_words = [
-        "کشاور",
-        "مزرعه",
-        "کود",
-        "بذر",
-        "سم",
-        "گندم",
-        "ذرت",
-        "جو",
-        "برنج",
-        "گوجه",
-        "خیار",
-        "پسته",
-        "انگور",
-        "سیب",
-        "زعفران",
-        "گلخانه",
-        "آبیاری",
-        "تراکتور",
-        "نهال",
-        "باغ",
-        "گیاه"
+    shoes = [
+        "کفش", "کتانی", "sneaker", "shoe", "running"
     ]
 
-    grooming_words = [
-        "ماشین اصلاح",
-        "اصلاح صورت",
-        "ریش تراش",
-        "ریش‌تراش",
-        "تریمر",
-        "موزر"
+    electronics = [
+        "موبایل", "گوشی", "تلفن", "لپ تاپ", "تبلت",
+        "کامپیوتر", "هدفون", "phone", "smartphone",
+        "laptop", "tablet", "headphone"
     ]
 
-    shoe_words = [
-        "کفش",
-        "کتانی",
-        "کفش ورزشی"
+    perfume = [
+        "عطر", "ادکلن", "perfume", "cologne"
     ]
 
-    phone_words = [
-        "گوشی",
-        "موبایل",
-        "تلفن همراه"
+    food = [
+        "غذا", "خوراکی", "شکلات", "قهوه", "نوشیدنی",
+        "food", "coffee", "chocolate", "drink"
     ]
 
-    perfume_words = [
-        "عطر",
-        "ادکلن",
-        "پرفیوم"
+    cosmetics = [
+        "کرم", "لوازم آرایش", "آرایش", "شامپو",
+        "cosmetic", "cream", "shampoo", "makeup"
     ]
 
-    food_words = [
-        "غذا",
-        "خوراکی",
-        "شکلات",
-        "بیسکویت",
-        "نوشیدنی",
-        "آبمیوه"
-    ]
+    for word in agriculture:
+        if word in t:
+            return "agriculture"
 
-    cosmetic_words = [
-        "کرم",
-        "لوازم آرایش",
-        "رژ",
-        "شامپو",
-        "صابون"
-    ]
+    for word in grooming:
+        if word in t:
+            return "grooming"
 
-    if any(
-        word in text
-        for word in agriculture_words
-    ):
-        return "agriculture"
+    for word in shoes:
+        if word in t:
+            return "shoes"
 
-    if any(
-        word in text
-        for word in grooming_words
-    ):
-        return "grooming"
+    for word in electronics:
+        if word in t:
+            return "electronics"
 
-    if any(
-        word in text
-        for word in shoe_words
-    ):
-        return "shoes"
+    for word in perfume:
+        if word in t:
+            return "perfume"
 
-    if any(
-        word in text
-        for word in phone_words
-    ):
-        return "electronics"
+    for word in food:
+        if word in t:
+            return "food"
 
-    if any(
-        word in text
-        for word in perfume_words
-    ):
-        return "perfume"
-
-    if any(
-        word in text
-        for word in food_words
-    ):
-        return "food"
-
-    if any(
-        word in text
-        for word in cosmetic_words
-    ):
-        return "cosmetics"
+    for word in cosmetics:
+        if word in t:
+            return "cosmetics"
 
     return "general"
 
 
 # =========================================================
-# SCENE TYPES
+# صحنه های تبلیغاتی
 # =========================================================
 
-SCENE_TYPES = {
-
+SCENES = {
     "agriculture": [
-
-        """
-Beautiful realistic agricultural field.
-Show the advertised agricultural product prominently
-as the hero product in the foreground.
-The crop and farming environment must be clearly visible.
-""",
-
-        """
-A real farmer in the same field examining and using
-the advertised agricultural product.
-The product must remain clearly visible.
-""",
-
-        """
-Close-up commercial shot of the agricultural product
-being used correctly in the real farming environment.
-Show the crop clearly.
-""",
-
-        """
-Detailed close-up of healthy plants and crops
-associated with the advertised product.
-Keep the product visible in the composition.
-""",
-
-        """
-Wide cinematic view of the successful agricultural field.
-Healthy crops dominate the environment.
-The advertised product is clearly displayed.
-""",
-
-        """
-Premium final agricultural advertising shot.
-Successful farm, healthy crops and the advertised product
-together in one strong commercial composition.
-"""
+        "wide cinematic wheat field at sunrise, farmer inspecting healthy crops",
+        "close-up of healthy green wheat plants in a professional agricultural field",
+        "farmer applying plant fertilizer carefully to wheat crops",
+        "modern agricultural field with strong healthy wheat plants and professional farming equipment",
+        "farmer standing proudly inside a beautiful productive wheat field",
+        "premium agricultural product advertisement, healthy crops, professional farm atmosphere"
     ],
-
 
     "grooming": [
-
-        """
-Premium bathroom or modern grooming environment.
-Show the advertised electric facial shaver prominently
-as the hero product.
-""",
-
-        """
-A well-groomed male model holding and examining
-the same electric facial shaver.
-The product must be clearly visible.
-""",
-
-        """
-Close-up of the same electric facial shaver
-being used on the man's face.
-Focus strongly on the product and shaving action.
-""",
-
-        """
-Detailed macro commercial shot of the shaver head,
-blades and premium product design.
-Clean professional grooming environment.
-""",
-
-        """
-The same man has a clean, smooth and well-groomed face
-after using the shaver.
-Show the product clearly beside him.
-""",
-
-        """
-Premium final product advertisement.
-The electric facial shaver is the hero object
-in a stylish clean grooming environment.
-"""
+        "modern luxury bathroom, handsome male model preparing for shaving",
+        "close-up professional electric shaver being used on a man's face",
+        "modern grooming scene with clean skin and premium grooming device",
+        "stylish bathroom counter with premium electric shaver and grooming accessories",
+        "confident man after shaving, clean professional appearance",
+        "premium commercial advertisement for an electric face shaver"
     ],
-
 
     "shoes": [
-
-        """
-Premium athletic environment.
-Show the advertised shoes prominently
-as the hero product.
-""",
-
-        """
-Athlete putting on the same shoes.
-Focus on the shoes rather than the person's face.
-""",
-
-        """
-Dynamic realistic running scene.
-Clearly show the same advertised shoes in action.
-""",
-
-        """
-Close-up commercial shot of the shoe material,
-sole, stitching and design.
-""",
-
-        """
-Athlete performing successfully while wearing
-the advertised shoes.
-The shoes remain clearly visible.
-""",
-
-        """
-Premium final shoe advertisement.
-The shoes are displayed prominently
-with a stylish athletic background.
-"""
+        "professional athlete running outdoors wearing premium athletic shoes",
+        "close-up of modern running shoes during athletic movement",
+        "beautiful sports track with athlete wearing the advertised shoes",
+        "urban lifestyle scene with fashionable athletic shoes",
+        "athlete confidently finishing a run wearing premium shoes",
+        "premium sports shoe commercial, dynamic professional advertising photography"
     ],
-
 
     "electronics": [
-
-        """
-Modern premium environment.
-Show the advertised smartphone prominently
-as the hero product.
-""",
-
-        """
-A person holding the same smartphone.
-Focus primarily on the device and its design.
-""",
-
-        """
-Close-up of the smartphone screen, camera,
-buttons and premium materials.
-""",
-
-        """
-Realistic everyday use of the same smartphone.
-Keep the phone clearly visible.
-""",
-
-        """
-Premium lifestyle scene showing the benefits
-of using the same smartphone.
-""",
-
-        """
-Final premium smartphone advertising hero shot.
-The phone dominates the composition.
-"""
+        "modern technology lifestyle scene with a premium smartphone",
+        "close-up of a modern smartphone with beautiful screen and reflections",
+        "professional person using a premium smartphone in a modern office",
+        "smartphone on a stylish desk surrounded by modern technology",
+        "young professional using smartphone in an elegant modern environment",
+        "premium technology commercial advertisement"
     ],
-
 
     "perfume": [
-
-        """
-Luxury environment with elegant lighting.
-Show the advertised perfume bottle prominently.
-""",
-
-        """
-A stylish model interacting with the same perfume.
-Keep the bottle as the main subject.
-""",
-
-        """
-Extreme close-up of the perfume bottle,
-glass, cap and liquid details.
-""",
-
-        """
-Elegant lifestyle scene suggesting the experience
-of using the same perfume.
-""",
-
-        """
-Premium beauty advertising composition.
-The perfume bottle remains highly visible.
-""",
-
-        """
-Final luxury perfume hero shot.
-The bottle is the dominant visual element.
-"""
+        "luxury perfume bottle in an elegant black and gold environment",
+        "close-up premium perfume bottle with dramatic studio lighting",
+        "luxury fashion environment with elegant perfume product",
+        "premium perfume bottle surrounded by beautiful reflections",
+        "luxury lifestyle scene with elegant fragrance product",
+        "high-end perfume commercial advertisement"
     ],
-
 
     "food": [
-
-        """
-Beautiful appetizing commercial scene.
-Show the advertised food or drink prominently.
-""",
-
-        """
-A person enjoying the same product.
-The product must remain the visual focus.
-""",
-
-        """
-Close-up macro food photography showing
-texture, freshness and product details.
-""",
-
-        """
-Professional commercial serving scene
-with the same product clearly visible.
-""",
-
-        """
-Appetizing lifestyle scene centered around
-the advertised product.
-""",
-
-        """
-Final premium food advertising hero shot.
-The product is prominently displayed.
-"""
+        "beautiful premium food photography in a modern restaurant",
+        "close-up delicious food with cinematic lighting",
+        "happy family enjoying the advertised food product",
+        "modern kitchen with premium food product",
+        "professional food advertisement with appetizing presentation",
+        "premium commercial food photography"
     ],
-
 
     "cosmetics": [
-
-        """
-Clean premium beauty environment.
-Show the advertised cosmetic product prominently.
-""",
-
-        """
-A model using the same cosmetic product.
-The product must remain clearly visible.
-""",
-
-        """
-Macro commercial shot of the product packaging,
-texture and details.
-""",
-
-        """
-Professional beauty scene showing the product
-in realistic use.
-""",
-
-        """
-Elegant result-focused beauty advertising scene.
-Keep the product visible.
-""",
-
-        """
-Final premium cosmetic product hero shot.
-"""
+        "luxury beauty studio with premium cosmetic product",
+        "close-up elegant cosmetic product with soft professional lighting",
+        "beautiful woman using premium cosmetic product",
+        "luxury bathroom with premium beauty products",
+        "professional beauty advertisement photography",
+        "premium cosmetics commercial"
     ],
 
-
     "general": [
-
-        """
-Professional commercial establishing shot.
-Show the exact advertised product prominently.
-""",
-
-        """
-A realistic person interacting directly
-with the same advertised product.
-""",
-
-        """
-Close-up commercial product photography
-of the same product.
-""",
-
-        """
-Show the product being used realistically
-in an environment appropriate to that product.
-""",
-
-        """
-Show the positive result or benefit of the product.
-Keep the same product visible.
-""",
-
-        """
-Premium final advertising hero shot.
-The exact product is the main visual subject.
-"""
+        "premium commercial product photography in a modern environment",
+        "close-up product advertisement with cinematic lighting",
+        "professional person using the advertised product",
+        "modern lifestyle scene featuring the advertised product",
+        "beautiful premium advertising scene",
+        "high-end commercial product photography"
     ]
 }
 
 
 # =========================================================
-# PROMPT GENERATOR
+# ساخت پرامپت
 # =========================================================
 
-def create_scene_prompts(
-    idea,
-    count
-):
+def create_prompt(idea, category, scene, index):
+    return f"""
+Create a professional commercial advertising photograph.
 
-    subject_type = detect_subject(
-        idea
-    )
-
-    scene_templates = SCENE_TYPES[
-        subject_type
-    ]
-
-    prompts = []
-
-    for i in range(count):
-
-        scene_template = scene_templates[
-            i % len(scene_templates)
-        ]
-
-        prompt = f"""
-CREATE SCENE {i + 1} OF {count}
-FOR ONE CONTINUOUS PROFESSIONAL PRODUCT COMMERCIAL.
-
-USER'S ORIGINAL IDEA:
+Product/service description:
 {idea}
 
-PRODUCT CATEGORY:
-{subject_type}
+Product category:
+{category}
 
-SCENE:
-{scene_template}
+Scene:
+{scene}
 
-CRITICAL RULE:
+This is advertisement image number {index} of a coherent advertising campaign.
 
-The exact product described by the user is the MAIN SUBJECT.
-
-Every scene must clearly relate to:
-
-{idea}
-
-Do not replace the product with another product.
-
-Do not create a generic unrelated scene.
-
-VISUAL CONTINUITY:
-
-Use the SAME product design,
-same product identity,
-same general environment,
-same lighting style,
-same cinematic style
-throughout the entire video.
-
-If a person is present,
-use the same person appearance and clothing
-throughout the scenes.
-
-The person is secondary.
-The PRODUCT is primary.
-
-The scene must look like a REAL COMMERCIAL,
-not a random AI image.
-
-STRICTLY FORBIDDEN:
-
-random people,
-unrelated people,
-generic portraits,
-unrelated objects,
-unrelated products,
-office,
-conference room,
-business meeting,
-random indoor room,
-bedroom,
-kitchen,
-city scene,
-unrelated landscape,
-generic stock photography,
-generic corporate photography,
-fantasy objects,
-different product,
-different brand,
-different product design.
-
-If the product is agricultural,
-the environment MUST be agricultural.
-
-If the product is a grooming product,
-use an appropriate clean grooming environment.
-
-If the product is shoes,
-use an appropriate athletic/lifestyle environment.
-
-If the product is electronics,
-use an appropriate modern environment.
-
-If the product is perfume or cosmetics,
-use an appropriate premium beauty environment.
-
-The environment must ALWAYS match the product.
-
-STYLE:
-
-photorealistic,
-professional commercial photography,
-cinematic,
-premium advertising,
-high detail,
-realistic materials,
-realistic lighting,
-natural shadows,
-professional camera,
-vertical 9:16 composition,
-sharp product details,
-beautiful composition.
-
-IMPORTANT:
-
-NO TEXT.
-
-NO WATERMARK.
-
-NO RANDOM LOGOS.
-
-NO INVENTED BRAND NAME.
-
-The product must be immediately recognizable.
-
-The image must look like a frame from
-a professional advertising campaign.
+Important:
+- Make the advertised product the main subject.
+- The image must clearly relate to the user's product.
+- Keep the same product concept throughout the campaign.
+- Realistic professional photography.
+- Cinematic lighting.
+- Premium commercial advertising quality.
+- Natural realistic people when people are needed.
+- Vertical composition suitable for a smartphone advertisement video.
+- No unrelated objects.
+- No random people posing without connection to the product.
+- No text.
+- No logos.
+- No watermark.
 """
 
-        prompts.append(
-            prompt
-        )
-
-    return prompts
-
 
 # =========================================================
-# IMAGE GENERATION
+# AI HORDE
 # =========================================================
 
-def generate_image(
-    prompt,
-    filename
-):
-
-    encoded_prompt = requests.utils.quote(
-        prompt
-    )
-
-    url = (
-        "https://image.pollinations.ai/prompt/"
-        + encoded_prompt
-    )
-
-    params = {
-
-        "model": "flux",
-
-        "width": 720,
-
-        "height": 1280,
-
-        "nologo": "true"
-
+def horde_headers():
+    return {
+        "apikey": HORDE_KEY,
+        "Client-Agent": CLIENT_AGENT,
+        "Content-Type": "application/json",
     }
 
-    response = requests.get(
-        url,
-        params=params,
-        timeout=180
+
+def generate_horde_image(prompt, output_file):
+    payload = {
+        "prompt": prompt,
+        "params": {
+            "width": 576,
+            "height": 1024,
+            "steps": 20,
+            "cfg_scale": 7,
+            "n": 1
+        },
+        "nsfw": False,
+        "censor_nsfw": True
+    }
+
+    response = requests.post(
+        f"{HORDE_API}/generate/async",
+        headers=horde_headers(),
+        json=payload,
+        timeout=60
     )
 
     response.raise_for_status()
 
-    image = Image.open(
-        io.BytesIO(
-            response.content
+    data = response.json()
+
+    job_id = data.get("id")
+
+    if not job_id:
+        raise Exception(f"Horde job ID not found: {data}")
+
+    print("Horde Job:", job_id)
+
+    start_time = time.time()
+
+    while True:
+
+        if time.time() - start_time > 900:
+            raise Exception("AI Horde timeout")
+
+        status_response = requests.get(
+            f"{HORDE_API}/generate/status/{job_id}",
+            headers=horde_headers(),
+            timeout=60
         )
-    )
 
-    image = image.convert(
-        "RGB"
-    )
+        status_response.raise_for_status()
 
-    image.save(
-        filename,
-        quality=95
-    )
+        status = status_response.json()
 
-    return filename
+        print("Horde status:", status)
+
+        if status.get("faulted"):
+            raise Exception("AI Horde generation failed")
+
+        if status.get("done"):
+            generations = status.get("generations", [])
+
+            if not generations:
+                raise Exception("Horde returned no image")
+
+            image_url = generations[0].get("img")
+
+            if not image_url:
+                raise Exception("Horde image URL missing")
+
+            image_response = requests.get(
+                image_url,
+                timeout=120
+            )
+
+            image_response.raise_for_status()
+
+            with open(output_file, "wb") as f:
+                f.write(image_response.content)
+
+            return output_file
+
+        time.sleep(5)
 
 
 # =========================================================
-# VIDEO CREATION
+# آماده سازی تصویر
 # =========================================================
 
-def create_video_from_images(
-    image_files,
-    output_file,
-    total_duration
-):
+def prepare_image(path, size=(720, 1280)):
+    img = Image.open(path).convert("RGB")
 
-    if not image_files:
-        raise Exception(
-            "No images found"
-        )
-
-    image_count = len(
-        image_files
+    img = ImageOps.fit(
+        img,
+        size,
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5)
     )
 
-    duration_per_image = (
-        total_duration /
-        image_count
-    )
+    img.save(path, quality=95)
 
+
+# =========================================================
+# ساخت ویدیو
+# =========================================================
+
+def create_video_from_images(image_files, output_file, duration):
     temp_dir = os.path.join(
         os.path.dirname(output_file),
         "frames"
     )
 
-    if os.path.exists(
-        temp_dir
-    ):
+    os.makedirs(temp_dir, exist_ok=True)
 
-        shutil.rmtree(
-            temp_dir
+    for i, image_file in enumerate(image_files):
+        frame_path = os.path.join(
+            temp_dir,
+            f"frame_{i:03d}.jpg"
         )
 
-    os.makedirs(
-        temp_dir
-    )
+        img = Image.open(image_file).convert("RGB")
 
-    frame_rate = 24
-
-    frame_number = 0
-
-    for image_file in image_files:
-
-        image = Image.open(
-            image_file
-        ).convert(
-            "RGB"
+        img = ImageOps.fit(
+            img,
+            (720, 1280),
+            method=Image.Resampling.LANCZOS
         )
 
-        target_width = 720
-        target_height = 1280
+        img.save(frame_path, quality=92)
 
-        image.thumbnail(
-            (
-                target_width,
-                target_height
-            ),
-            Image.Resampling.LANCZOS
-        )
+    seconds_per_image = duration / len(image_files)
 
-        canvas = Image.new(
-            "RGB",
-            (
-                target_width,
-                target_height
-            ),
-            "black"
-        )
-
-        x = (
-            target_width -
-            image.width
-        ) // 2
-
-        y = (
-            target_height -
-            image.height
-        ) // 2
-
-        canvas.paste(
-            image,
-            (
-                x,
-                y
-            )
-        )
-
-        frames_for_image = max(
-            1,
-            round(
-                duration_per_image *
-                frame_rate
-            )
-        )
-
-        for _ in range(
-            frames_for_image
-        ):
-
-            frame_path = os.path.join(
-                temp_dir,
-                f"frame_{frame_number:06d}.jpg"
-            )
-
-            canvas.save(
-                frame_path,
-                quality=90
-            )
-
-            frame_number += 1
-
-    ffmpeg = shutil.which(
-        "ffmpeg"
-    )
-
-    if not ffmpeg:
-
-        raise Exception(
-            "FFmpeg not found"
-        )
-
-    input_pattern = os.path.join(
+    concat_file = os.path.join(
         temp_dir,
-        "frame_%06d.jpg"
+        "concat.txt"
     )
+
+    with open(concat_file, "w", encoding="utf-8") as f:
+        for i in range(len(image_files)):
+            frame_path = os.path.abspath(
+                os.path.join(
+                    temp_dir,
+                    f"frame_{i:03d}.jpg"
+                )
+            )
+
+            f.write(
+                f"file '{frame_path}'\n"
+            )
+
+            f.write(
+                f"duration {seconds_per_image}\n"
+            )
+
+        last_frame = os.path.abspath(
+            os.path.join(
+                temp_dir,
+                f"frame_{len(image_files)-1:03d}.jpg"
+            )
+        )
+
+        f.write(
+            f"file '{last_frame}'\n"
+        )
 
     command = [
-
-        ffmpeg,
-
+        "ffmpeg",
         "-y",
-
-        "-framerate",
-        str(frame_rate),
-
+        "-f",
+        "concat",
+        "-safe",
+        "0",
         "-i",
-        input_pattern,
-
+        concat_file,
         "-vf",
-        (
-            "scale=720:1280:"
-            "force_original_aspect_ratio=decrease,"
-            "pad=720:1280:(ow-iw)/2:(oh-ih)/2,"
-            "format=yuv420p"
-        ),
-
+        "scale=720:1280:force_original_aspect_ratio=increase,"
+        "crop=720:1280",
+        "-r",
+        "24",
         "-c:v",
         "libx264",
-
         "-preset",
         "veryfast",
-
         "-crf",
-        "23",
-
+        "27",
+        "-pix_fmt",
+        "yuv420p",
         "-movflags",
         "+faststart",
-
         output_file
     ]
 
@@ -1132,621 +429,360 @@ def create_video_from_images(
     )
 
     shutil.rmtree(
-        temp_dir
+        temp_dir,
+        ignore_errors=True
     )
 
     return output_file
 
 
 # =========================================================
-# DURATION MENU
+# تنظیمات
 # =========================================================
 
-async def ask_duration(
-    update,
-    context
-):
+def save_settings(chat_id, settings):
+    path = os.path.join(
+        get_chat_dir(chat_id),
+        "settings.json"
+    )
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            settings,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
+def load_settings(chat_id):
+    path = os.path.join(
+        get_chat_dir(chat_id),
+        "settings.json"
+    )
+
+    if not os.path.exists(path):
+        return {
+            "duration": 30,
+            "images": 6,
+            "idea": ""
+        }
+
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+# =========================================================
+# /start
+# =========================================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
-
         [
             InlineKeyboardButton(
-                "30 ثانیه",
-                callback_data="duration_30"
-            ),
-
-            InlineKeyboardButton(
-                "45 ثانیه",
-                callback_data="duration_45"
+                "🎬 ساخت تبلیغ جدید",
+                callback_data="new_video"
             )
         ],
-
         [
             InlineKeyboardButton(
-                "60 ثانیه",
-                callback_data="duration_60"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "✏️ مدت دلخواه",
-                callback_data="duration_custom"
+                "🔄 شروع مجدد",
+                callback_data="restart"
             )
         ]
-
     ]
 
-    message = await update.effective_chat.send_message(
-
-        "⏱ مدت ویدیو را انتخاب کن:\n\n"
-        "حداقل مدت: ۳۰ ثانیه",
-
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        )
-    )
-
-    await remember_message(
-        update,
-        message
+    await update.message.reply_text(
+        "🤖 ربات ساخت ویدیوی تبلیغاتی آماده است.\n\n"
+        "مثلاً بنویس:\n"
+        "«تبلیغ کود گیاهی برای گندم»\n\n"
+        "یا:\n"
+        "«تبلیغ ماشین اصلاح صورت»",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 # =========================================================
-# IMAGE COUNT MENU
+# دکمه ها
 # =========================================================
 
-async def ask_image_count(
-    update,
-    context
-):
-
-    keyboard = [
-
-        [
-            InlineKeyboardButton(
-                "6 عکس",
-                callback_data="images_6"
-            ),
-
-            InlineKeyboardButton(
-                "9 عکس",
-                callback_data="images_9"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "12 عکس",
-                callback_data="images_12"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "✏️ تعداد دلخواه",
-                callback_data="images_custom"
-            )
-        ]
-
-    ]
-
-    message = await update.effective_chat.send_message(
-
-        "🖼 تعداد تصاویر را انتخاب کن:\n\n"
-        "حداقل: ۶ تصویر",
-
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        )
-    )
-
-    await remember_message(
-        update,
-        message
-    )
-
-
-# =========================================================
-# BUTTON HANDLER
-# =========================================================
-
-async def button_handler(
-    update,
-    context
-):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
-
     await query.answer()
+
+    chat_id = query.message.chat_id
+
+    if query.data == "restart":
+
+        chat_dir = get_chat_dir(chat_id)
+
+        for name in os.listdir(chat_dir):
+            path = os.path.join(chat_dir, name)
+
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+        await query.message.reply_text(
+            "🔄 شروع مجدد انجام شد.\n\n"
+            "حالا توضیح تبلیغت را بفرست."
+        )
+
+        return
+
+    if query.data == "new_video":
+
+        save_settings(
+            chat_id,
+            {
+                "duration": 30,
+                "images": 6,
+                "idea": ""
+            }
+        )
+
+        await query.message.reply_text(
+            "📝 توضیح محصول یا تبلیغ را بفرست."
+        )
+
+
+# =========================================================
+# دریافت متن
+# =========================================================
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not update.message or not update.message.text:
+        return
+
+    chat_id = update.message.chat_id
+    text = update.message.text.strip()
+
+    settings = load_settings(chat_id)
+
+    settings["idea"] = text
+
+    save_settings(chat_id, settings)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("30 ثانیه", callback_data="dur_30"),
+            InlineKeyboardButton("45 ثانیه", callback_data="dur_45"),
+            InlineKeyboardButton("60 ثانیه", callback_data="dur_60")
+        ],
+        [
+            InlineKeyboardButton("6 تصویر", callback_data="img_6"),
+            InlineKeyboardButton("9 تصویر", callback_data="img_9"),
+            InlineKeyboardButton("12 تصویر", callback_data="img_12")
+        ],
+        [
+            InlineKeyboardButton(
+                "🎬 ساخت ویدیو",
+                callback_data="build"
+            )
+        ]
+    ]
+
+    await update.message.reply_text(
+        "✅ توضیح تبلیغ دریافت شد.\n\n"
+        "⏱ مدت ویدیو را انتخاب کن و سپس تعداد تصاویر را مشخص کن:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# =========================================================
+# تنظیمات دکمه ای
+# =========================================================
+
+async def settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = query.message.chat_id
+    settings = load_settings(chat_id)
 
     data = query.data
 
-    # -----------------------------
-    # RESTART
-    # -----------------------------
+    if data.startswith("dur_"):
+        settings["duration"] = int(
+            data.replace("dur_", "")
+        )
 
-    if data == "restart":
+        save_settings(chat_id, settings)
 
-        await restart(
-            update,
-            context
+        await query.message.reply_text(
+            f"⏱ مدت انتخاب شد: {settings['duration']} ثانیه"
         )
 
         return
 
-    # -----------------------------
-    # START
-    # -----------------------------
+    if data.startswith("img_"):
+        settings["images"] = int(
+            data.replace("img_", "")
+        )
 
-    if data == "start_video":
+        save_settings(chat_id, settings)
 
-        await start_video(
-            update,
-            context
+        await query.message.reply_text(
+            f"🖼 تعداد تصاویر: {settings['images']}"
         )
 
         return
 
-    # -----------------------------
-    # DURATION
-    # -----------------------------
+    if data == "build":
 
-    if data.startswith(
-        "duration_"
-    ):
-
-        value = data.replace(
-            "duration_",
-            ""
-        )
-
-        if value == "custom":
-
-            context.user_data[
-                "step"
-            ] = "custom_duration"
-
-            message = await query.message.reply_text(
-
-                "⏱ مدت ویدیو را به ثانیه بنویس.\n\n"
-                "حداقل ۳۰ ثانیه.\n"
-                "مثلاً: 75"
+        if not settings.get("idea"):
+            await query.message.reply_text(
+                "❌ ابتدا توضیح تبلیغ را بفرست."
             )
-
-            await remember_message(
-                update,
-                message
-            )
-
             return
-
-        duration = int(
-            value
-        )
-
-        context.user_data[
-            "duration"
-        ] = duration
-
-        await ask_image_count(
-            update,
-            context
-        )
-
-        return
-
-    # -----------------------------
-    # IMAGES
-    # -----------------------------
-
-    if data.startswith(
-        "images_"
-    ):
-
-        value = data.replace(
-            "images_",
-            ""
-        )
-
-        if value == "custom":
-
-            context.user_data[
-                "step"
-            ] = "custom_images"
-
-            message = await query.message.reply_text(
-
-                "🖼 تعداد تصاویر را وارد کن.\n\n"
-                "حداقل ۶ تصویر.\n"
-                "مثلاً: 8"
-            )
-
-            await remember_message(
-                update,
-                message
-            )
-
-            return
-
-        image_count = int(
-            value
-        )
-
-        context.user_data[
-            "image_count"
-        ] = image_count
 
         await build_video(
-            update,
-            context
+            query,
+            settings
         )
 
-        return
-
 
 # =========================================================
-# TEXT HANDLER
+# ساخت ویدیو
 # =========================================================
 
-async def text_handler(
-    update,
-    context
-):
+async def build_video(query, settings):
 
-    text = update.message.text.strip()
+    chat_id = query.message.chat_id
+    idea = settings["idea"]
+    duration = int(settings["duration"])
+    image_count = int(settings["images"])
 
-    step = context.user_data.get(
-        "step"
+    category = detect_subject(idea)
+
+    chat_dir = get_chat_dir(chat_id)
+
+    # پاک کردن تصاویر قبلی
+    for name in os.listdir(chat_dir):
+        if name.startswith("image_") and name.endswith(".jpg"):
+            try:
+                os.remove(
+                    os.path.join(chat_dir, name)
+                )
+            except:
+                pass
+
+    await query.message.reply_text(
+        f"🚀 ساخت تبلیغ شروع شد.\n\n"
+        f"📌 محصول: {idea}\n"
+        f"📂 دسته: {category}\n"
+        f"🖼 تصاویر: {image_count}\n"
+        f"⏱ زمان: {duration} ثانیه\n\n"
+        f"⏳ تولید تصاویر با AI Horde شروع شد..."
     )
 
-    # -----------------------------
-    # IDEA
-    # -----------------------------
+    image_files = []
 
-    if step == "idea":
+    scenes = SCENES.get(
+        category,
+        SCENES["general"]
+    )
 
-        context.user_data[
-            "idea"
-        ] = text
+    for i in range(image_count):
 
-        context.user_data[
-            "step"
-        ] = "duration"
+        scene = scenes[i % len(scenes)]
 
-        await ask_duration(
-            update,
-            context
+        prompt = create_prompt(
+            idea,
+            category,
+            scene,
+            i + 1
         )
 
-        return
-
-    # -----------------------------
-    # CUSTOM DURATION
-    # -----------------------------
-
-    if step == "custom_duration":
+        output_file = os.path.join(
+            chat_dir,
+            f"image_{i+1:03d}.jpg"
+        )
 
         try:
 
-            duration = int(
-                text
+            await query.message.reply_text(
+                f"🖼 تصویر {i+1}/{image_count} در حال تولید است..."
             )
 
-            if duration < 30:
-
-                message = await update.message.reply_text(
-                    "❌ حداقل مدت ویدیو ۳۰ ثانیه است."
-                )
-
-                await remember_message(
-                    update,
-                    message
-                )
-
-                return
-
-            if duration > 300:
-
-                message = await update.message.reply_text(
-                    "❌ حداکثر مدت ویدیو ۳۰۰ ثانیه است."
-                )
-
-                await remember_message(
-                    update,
-                    message
-                )
-
-                return
-
-            context.user_data[
-                "duration"
-            ] = duration
-
-            await ask_image_count(
-                update,
-                context
+            generate_horde_image(
+                prompt,
+                output_file
             )
 
-        except ValueError:
+            prepare_image(output_file)
 
-            message = await update.message.reply_text(
-                "❌ فقط عدد وارد کن.\nمثلاً: 75"
+            image_files.append(output_file)
+
+            print(
+                f"Image {i+1} created: {output_file}"
             )
 
-            await remember_message(
-                update,
-                message
+        except Exception as e:
+
+            print(
+                "IMAGE ERROR:",
+                repr(e)
             )
+
+            await query.message.reply_text(
+                f"⚠️ تصویر {i+1} ساخته نشد.\n"
+                f"در حال تلاش مجدد..."
+            )
+
+            try:
+
+                generate_horde_image(
+                    prompt + "\nHigh quality realistic commercial photography.",
+                    output_file
+                )
+
+                prepare_image(output_file)
+
+                image_files.append(
+                    output_file
+                )
+
+            except Exception as e2:
+
+                print(
+                    "RETRY ERROR:",
+                    repr(e2)
+                )
+
+    if len(image_files) < 2:
+
+        await query.message.reply_text(
+            "❌ تصاویر کافی برای ساخت ویدیو تولید نشد.\n"
+            "احتمالاً صف AI Horde شلوغ است."
+        )
 
         return
 
-    # -----------------------------
-    # CUSTOM IMAGES
-    # -----------------------------
-
-    if step == "custom_images":
-
-        try:
-
-            count = int(
-                text
-            )
-
-            if count < 6:
-
-                message = await update.message.reply_text(
-                    "❌ حداقل ۶ تصویر لازم است."
-                )
-
-                await remember_message(
-                    update,
-                    message
-                )
-
-                return
-
-            if count > 30:
-
-                message = await update.message.reply_text(
-                    "❌ حداکثر ۳۰ تصویر است."
-                )
-
-                await remember_message(
-                    update,
-                    message
-                )
-
-                return
-
-            context.user_data[
-                "image_count"
-            ] = count
-
-            await build_video(
-                update,
-                context
-            )
-
-        except ValueError:
-
-            message = await update.message.reply_text(
-                "❌ فقط عدد وارد کن.\nمثلاً: 8"
-            )
-
-            await remember_message(
-                update,
-                message
-            )
-
-        return
-
-
-# =========================================================
-# BUILD VIDEO
-# =========================================================
-
-async def build_video(
-    update,
-    context
-):
-
-    chat_id = update.effective_chat.id
-
-    idea = context.user_data.get(
-        "idea",
-        ""
+    await query.message.reply_text(
+        "🎬 تصاویر آماده شدند.\n"
+        "در حال ساخت ویدیوی نهایی..."
     )
 
-    duration = context.user_data.get(
-        "duration",
-        30
-    )
-
-    image_count = context.user_data.get(
-        "image_count",
-        6
-    )
-
-    work_dir = os.path.join(
-        BASE_DIR,
-        str(chat_id),
-        "current_video"
-    )
-
-    if os.path.exists(
-        work_dir
-    ):
-
-        shutil.rmtree(
-            work_dir
-        )
-
-    os.makedirs(
-        work_dir,
-        exist_ok=True
-    )
-
-    progress = await send_message(
-
-        update,
-
-        (
-            "🎬 ساخت ویدیو شروع شد.\n\n"
-
-            f"💡 موضوع:\n{idea}\n\n"
-
-            f"⏱ مدت: {duration} ثانیه\n"
-
-            f"🖼 تصاویر: {image_count}\n\n"
-
-            "🧠 در حال تشخیص نوع محصول و طراحی سناریو..."
-        )
+    video_file = os.path.join(
+        chat_dir,
+        "advertising_video.mp4"
     )
 
     try:
 
-        subject_type = detect_subject(
-            idea
-        )
-
-        prompts = create_scene_prompts(
-            idea,
-            image_count
-        )
-
-        await progress.edit_text(
-
-            (
-                "🎬 سناریو آماده شد.\n\n"
-
-                f"📌 نوع محصول: {subject_type}\n"
-
-                f"🖼 تعداد تصاویر: {image_count}\n\n"
-
-                "🎨 در حال تولید تصاویر..."
-            )
-        )
-
-        image_files = []
-
-        for i, prompt in enumerate(
-            prompts
-        ):
-
-            await progress.edit_text(
-
-                (
-                    "🎨 در حال تولید تصاویر...\n\n"
-
-                    f"🖼 تصویر {i + 1} از "
-                    f"{image_count}\n\n"
-
-                    f"📌 محصول: {idea}"
-                )
-            )
-
-            filename = os.path.join(
-
-                work_dir,
-
-                f"image_{i + 1}.jpg"
-            )
-
-            generate_image(
-                prompt,
-                filename
-            )
-
-            image_files.append(
-                filename
-            )
-
-            time.sleep(1)
-
-        await progress.edit_text(
-
-            "🎞 تمام تصاویر آماده شدند.\n\n"
-            "در حال ساخت ویدیوی MP4..."
-        )
-
-        output_file = os.path.join(
-
-            work_dir,
-
-            "final_video.mp4"
-        )
-
         create_video_from_images(
-
             image_files,
-
-            output_file,
-
+            video_file,
             duration
-        )
-
-        await progress.edit_text(
-            "📤 ویدیو آماده شد.\n\n"
-            "در حال ارسال..."
-        )
-
-        with open(
-            output_file,
-            "rb"
-        ) as video:
-
-            await update.effective_chat.send_video(
-
-                video=video,
-
-                caption=(
-
-                    "✅ ویدیوی تبلیغاتی آماده شد.\n\n"
-
-                    f"💡 موضوع: {idea}\n"
-
-                    f"⏱ مدت: {duration} ثانیه\n"
-
-                    f"🖼 تصاویر: {image_count}"
-                ),
-
-                supports_streaming=True
-            )
-
-        context.user_data.clear()
-
-        keyboard = [
-
-            [
-                InlineKeyboardButton(
-                    "🚀 ساخت ویدیوی جدید",
-                    callback_data="start_video"
-                )
-            ],
-
-            [
-                InlineKeyboardButton(
-                    "🗑 شروع مجدد",
-                    callback_data="restart"
-                )
-            ]
-
-        ]
-
-        message = await update.effective_chat.send_message(
-
-            "برای ساخت ویدیوی بعدی:",
-
-            reply_markup=InlineKeyboardMarkup(
-                keyboard
-            )
-        )
-
-        await remember_message(
-            update,
-            message
         )
 
     except Exception as e:
@@ -1756,17 +792,42 @@ async def build_video(
             repr(e)
         )
 
-        try:
+        await query.message.reply_text(
+            "❌ خطا هنگام ساخت ویدیو."
+        )
 
-            await progress.edit_text(
+        return
 
-                "❌ خطا در ساخت ویدیو.\n\n"
+    await query.message.reply_text(
+        "✅ ویدیو آماده شد.\n"
+        "📤 در حال ارسال..."
+    )
 
-                f"{str(e)[:1500]}"
+    try:
+
+        with open(video_file, "rb") as video:
+
+            await query.message.reply_video(
+                video=video,
+                caption=(
+                    "🎬 تبلیغ آماده شد\n\n"
+                    f"⏱ {duration} ثانیه\n"
+                    f"🖼 {len(image_files)} تصویر\n"
+                    f"📌 {idea}"
+                ),
+                supports_streaming=True
             )
 
-        except Exception:
-            pass
+    except Exception as e:
+
+        print(
+            "TELEGRAM VIDEO ERROR:",
+            repr(e)
+        )
+
+        await query.message.reply_text(
+            "❌ ارسال ویدیو به تلگرام ناموفق بود."
+        )
 
 
 # =========================================================
@@ -1775,12 +836,6 @@ async def build_video(
 
 def main():
 
-    if not BOT_TOKEN:
-
-        raise RuntimeError(
-            "BOT_TOKEN is not configured"
-        )
-
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -1788,37 +843,36 @@ def main():
     )
 
     app.add_handler(
-        CommandHandler(
-            "start",
-            start
+        CommandHandler("start", start)
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            button_handler,
+            pattern="^(restart|new_video)$"
         )
     )
 
     app.add_handler(
         CallbackQueryHandler(
-            button_handler
+            settings_handler,
+            pattern="^(dur_|img_|build)"
         )
     )
 
     app.add_handler(
         MessageHandler(
-            filters.TEXT &
-            ~filters.COMMAND,
-            text_handler
+            filters.TEXT & ~filters.COMMAND,
+            message_handler
         )
     )
 
-    print(
-        "AI Video Telegram Bot is running..."
+    print("BOT STARTED")
+
+    app.run_polling(
+        drop_pending_updates=True
     )
 
-    app.run_polling()
-
-
-# =========================================================
-# RUN
-# =========================================================
 
 if __name__ == "__main__":
-
     main()
